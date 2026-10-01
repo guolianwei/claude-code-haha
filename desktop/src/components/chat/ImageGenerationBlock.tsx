@@ -109,7 +109,7 @@ function ImageGenerationCollection({
   })
   const allEdits = itemViews.length > 0 && itemViews.every((item) => item.isEdit)
   const totalSlotCount = itemViews.reduce((sum, item) => sum + item.slotCount, 0)
-  const galleryImages: Array<{ src: string; name: string }> = []
+  const galleryImages: Array<{ src: string; name: string; path: string }> = []
   const slots: ImageSlot[] = []
 
   for (const item of itemViews) {
@@ -121,6 +121,7 @@ function ImageGenerationCollection({
         galleryImages.push({
           src: localImageFileUrl(image.path),
           name: fileName(image.path) || t('tool.generatedImageAlt', { index: galleryIndex + 1 }),
+          path: image.path,
         })
         slots.push({
           key: `${item.id}-${index}`,

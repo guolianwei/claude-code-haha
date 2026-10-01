@@ -427,6 +427,33 @@ describe('AttachmentGallery', () => {
     expect(await view.findByText('1 / 1')).toBeInTheDocument()
   })
 
+  it('lets the gallery hand the path-backed image to the system app', async () => {
+    const view = render(
+      <AttachmentGallery
+        variant="composer"
+        attachments={[{ id: 'pasted-1', type: 'image', name: 'shot.png', path: '/Users/nanmi/Desktop/shot.png' }]}
+      />,
+    )
+    fireEvent.click(view.getByRole('button', { name: 'Open shot.png' }))
+
+    fireEvent.click(await view.findByRole('button', { name: 'Open in system app' }))
+
+    await waitFor(() => expect(openPath).toHaveBeenCalledWith('/Users/nanmi/Desktop/shot.png'))
+  })
+
+  it('offers no original to open for an image that has no file behind it', async () => {
+    const view = render(
+      <AttachmentGallery
+        variant="composer"
+        attachments={[{ id: 'inline-1', type: 'image', name: 'inline.png', previewUrl: 'data:image/png;base64,AAAA' }]}
+      />,
+    )
+    fireEvent.click(view.getByRole('button', { name: 'Open inline.png' }))
+
+    await view.findByText('1 / 1')
+    expect(view.queryByRole('button', { name: 'Open in system app' })).not.toBeInTheDocument()
+  })
+
   it('falls back to the file card when a path-only image cannot be loaded', () => {
     const view = render(
       <AttachmentGallery

@@ -9,12 +9,14 @@ import { marked, type Tokens } from 'marked'
 import {
   cjkAwareAutolink,
   fileRefFromElement,
+  fileLinkAttributes,
   FILE_LINK_CLASS,
   linkifyFilePaths,
   renderCodespan,
   unwrapFileLinks,
 } from '@/lib/markdownAutolink'
-import { isSafeMarkdownImageSource } from '@/lib/markdownImages'
+import { classifyPreviewLink } from '@/lib/previewLinkRouter'
+import { isSafeMarkdownImageSource, normalizeMarkdownImageDestination } from '@/lib/markdownImages'
 import { CodeViewer } from '../chat/CodeViewer'
 import { MermaidRenderer } from '../chat/MermaidRenderer'
 import { copyTextToClipboard } from '@/lib/clipboard'
@@ -35,6 +37,17 @@ type Props = {
    * sources survive.
    */
   resolveImageSrc?: (src: string) => string | null
+  /**
+   * Called when an image is clicked (not one inside a link, which belongs to the
+   * link), with every image in the text in reading order — sources as they load,
+   * so a viewer can show them — and the place of the one clicked.
+   */
+  onImageClick?: (click: MarkdownImageClick) => void
+}
+
+export type MarkdownImageClick = {
+  images: Array<{ src: string; alt: string }>
+  index: number
 }
 
 type CodeBlock = {
@@ -126,6 +139,27 @@ renderer.code = function ({ text, lang }: Tokens.Code) {
 }
 
 renderer.codespan = renderCodespan
+
+const renderDefaultLink = renderer.link
+renderer.link = function (token: Tokens.Link) {
+  // Explicit Markdown file URLs lose their href during sanitization. Preserve
+  // validated local destinations as data, just like automatic file references.
+  const target = classifyPreviewLink(token.href)
+  if (target.path) {
+    return `<a class="${FILE_LINK_CLASS}" ${fileLinkAttributes({ raw: token.href, path: target.path, line: target.line, column: target.column })}>${this.parser.parseInline(token.tokens)}</a>`
+  }
+  return renderDefaultLink.call(this, token)
+}
+
+// `file:///C:/x.png` and `C:\x.png` lose their source in sanitization as written
+// (see normalizeMarkdownImageDestination), and this is the last place the author's
+// destination is still separate from the markup around it — and, in `raw`, still
+// as written, where the parser has taken the backslashes out of a Windows path.
+const renderDefaultImage = renderer.image
+renderer.image = function (token: Tokens.Image) {
+  const href = normalizeMarkdownImageDestination(token.href, token.raw)
+  return renderDefaultImage.call(this, href === token.href ? token : { ...token, href })
+}
 
 marked.setOptions({
   breaks: true,
@@ -563,25 +597,43 @@ const COMPACT_PROSE_CLASSES = `
   [&_.md-math-display]:my-2 [&_.md-math-display]:py-1 [&_.md-math-display_.katex]:text-[1.04em]
   [&_.md-table-wrap]:my-2`
 
-function getProseClasses(variant: 'default' | 'document' | 'compact', className?: string) {
+function getProseClasses(variant: 'default' | 'document' | 'compact', className?: string, zoomableImages = false) {
   return [
     BASE_PROSE_CLASSES,
     variant === 'document' ? DOCUMENT_PROSE_CLASSES : '',
     variant === 'compact' ? COMPACT_PROSE_CLASSES : '',
+    // Only where a click on the picture does something.
+    zoomableImages ? '[&_img]:cursor-zoom-in' : '',
     className ?? '',
   ]
     .filter(Boolean)
     .join(' ')
 }
 
-export const MarkdownRenderer = memo(function MarkdownRenderer({ content, variant = 'default', className, cache = true, streaming = false, onLinkClick, resolveImageSrc }: Props) {
+function reportImageClick(
+  target: HTMLElement | null,
+  container: HTMLElement,
+  onImageClick: (click: MarkdownImageClick) => void,
+): void {
+  const clicked = target?.closest<HTMLImageElement>('img')
+  if (!clicked || !container.contains(clicked)) return
+  const images = Array.from(container.querySelectorAll<HTMLImageElement>('img')).filter((image) => image.getAttribute('src'))
+  const index = images.indexOf(clicked)
+  if (index < 0) return
+  onImageClick({
+    images: images.map((image) => ({ src: image.getAttribute('src')!, alt: image.getAttribute('alt') ?? '' })),
+    index,
+  })
+}
+
+export const MarkdownRenderer = memo(function MarkdownRenderer({ content, variant = 'default', className, cache = true, streaming = false, onLinkClick, resolveImageSrc, onImageClick }: Props) {
   const { html, codeBlocks, mathBlocks } = useMemo(
     () => cache ? getCachedMarkdownParse(content, streaming) : parseMarkdown(content),
     [cache, content, streaming],
   )
   const proseClasses = useMemo(
-    () => getProseClasses(variant, className),
-    [variant, className],
+    () => getProseClasses(variant, className, Boolean(onImageClick)),
+    [variant, className, onImageClick],
   )
 
   const parts = useMemo(() => {
@@ -635,7 +687,12 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, varian
     const button = target?.closest<HTMLButtonElement>('[data-copy-code]')
     if (!button) {
       const link = target?.closest<HTMLAnchorElement>('a[href], a[data-file-path]')
-      if (!link || !onLinkClick) return
+      if (!link) {
+        // A picture in a link is the link's; a bare one opens in the viewer.
+        if (onImageClick) reportImageClick(target, event.currentTarget, onImageClick)
+        return
+      }
+      if (!onLinkClick) return
 
       const handled = onLinkClick(fileRefFromElement(link) ?? link.getAttribute('href') ?? '', event)
       if (handled) {
@@ -656,7 +713,7 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, varian
     window.setTimeout(() => {
       button.textContent = original
     }, 1500)
-  }, [onLinkClick])
+  }, [onImageClick, onLinkClick])
 
   if (codeBlocks.length === 0) {
     return (

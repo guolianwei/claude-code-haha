@@ -7942,6 +7942,43 @@ describe('MessageList nested tool calls', () => {
     expect(screen.queryByText(/This model does not support images/)).toBeNull()
   })
 
+  it.each([
+    ['en', /too large for your provider or relay/, /removed automatically/],
+    ['zh', /服务商或中转站允许的大小/, /自动移除/],
+  ] as const)(
+    'explains a request-too-large rejection as a provider limit and the recovery that follows (%s)',
+    (locale, limit, recovery) => {
+      useSettingsStore.setState({ locale })
+      useChatStore.setState({
+        sessions: {
+          [ACTIVE_TAB]: makeSessionState({
+            messages: [
+              {
+                id: 'error-1',
+                type: 'error',
+                code: 'invalid_request',
+                businessErrorCode: 'request_too_large',
+                message:
+                  'Request too large: your provider or relay rejected it (HTTP 413). This conversation is about 24MB.',
+                timestamp: 1,
+              },
+            ],
+          }),
+        },
+      })
+
+      render(<MessageList />)
+
+      expect(screen.getByText(limit)).toBeTruthy()
+      expect(screen.getByText(recovery)).toBeTruthy()
+      // The old copy blamed the selected model and asked users to delete files
+      // by hand, although the limit belongs to the provider and old media is
+      // now dropped automatically.
+      expect(screen.queryByText(/selected model|当前模型/)).toBeNull()
+      expect(screen.queryByText(/Remove large files|移除大文件/)).toBeNull()
+    },
+  )
+
   it('restores opener focus without scrolling when its render item remains fully visible', async () => {
     useChatStore.setState({
       sessions: {

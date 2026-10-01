@@ -80,9 +80,15 @@ test('temporary side chat forks a fixed boundary, supports independent multi-tur
     await eventually(() => child.events.filter(event => event.type === 'message_complete').length >= 3, 'side tool completed')
     expect(main.events.some(event => event.type === 'permission_request')).toBe(false)
     // A runtime change that needs restart must fail before stopping the live child.
-    child.socket.send(JSON.stringify({ type: 'set_runtime_config', providerId: 'different-provider', modelId: 'other' }))
-    await eventually(() => child.events.some(event => event.code === 'SIDE_CHAT_RUNTIME_RESTART_UNAVAILABLE'), 'safe runtime rejection')
-    expect(conversationService.hasSession(side.sessionId)).toBe(true)
+    const appliedRuntimeCount = child.events.filter(event => event.type === 'runtime_config_applied').length
+    for (const providerId of ['different-provider', 'openai-official']) {
+      const rejectionCount = child.events.filter(event => event.code === 'SIDE_CHAT_RUNTIME_RESTART_UNAVAILABLE').length
+      child.socket.send(JSON.stringify({ type: 'set_runtime_config', providerId, modelId: 'other' }))
+      await eventually(() => child.events.filter(event => event.code === 'SIDE_CHAT_RUNTIME_RESTART_UNAVAILABLE').length > rejectionCount, 'safe runtime rejection')
+      expect(conversationService.hasSession(side.sessionId)).toBe(true)
+      expect(child.events.filter(event => event.type === 'runtime_config_applied')).toHaveLength(appliedRuntimeCount)
+      expect((await sessionService.getSessionLaunchInfo(side.sessionId))?.runtimeModelId).toBe('mock-next')
+    }
     expect((await api(`/api/sessions/${side.sessionId}/messages`)).messages).toEqual([])
     expect(await api(`/api/sessions/${side.sessionId}/turn-checkpoints`)).toEqual({ checkpoints: [] })
     expect(await sessionService.getSessionMessagesWithEvidence(side.sessionId)).toEqual({ messages: [], transcriptEvidenceComplete: false })

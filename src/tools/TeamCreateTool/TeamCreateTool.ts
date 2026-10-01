@@ -134,9 +134,11 @@ export const TeamCreateTool: Tool<InputSchema, Output> = buildTool({
     }
 
     const leadAgentType = agent_type || TEAM_LEAD_NAME
-    // Get the team lead's current model from AppState (handles session model, settings, CLI override)
+    // Headless sessions carry the executing model in tool options; AppState can
+    // remain unset or stale after an SDK model change.
     const leadModel = parseUserSpecifiedModel(
-      appState.mainLoopModelForSession ??
+      context.options.mainLoopModel ??
+        appState.mainLoopModelForSession ??
         appState.mainLoopModel ??
         getDefaultMainLoopModel(),
     )

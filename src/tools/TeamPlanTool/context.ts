@@ -59,7 +59,7 @@ export function snapshotTeamAgents(context: ToolUseContext) {
 
 export function resolveProposedTeamPlan(plan: ProposedTeamPlan, context: ToolUseContext) {
   const state = context.getAppState()
-  const leaderRuntime = getTeamLeaderRuntime(state.mainLoopModelForSession ?? state.mainLoopModel ?? '')
+  const leaderRuntime = getTeamLeaderRuntime(context.options.mainLoopModel ?? state.mainLoopModelForSession ?? state.mainLoopModel ?? '')
   const agentCatalog = snapshotTeamAgents(context)
   const members: TeamPlanMember[] = plan.members.map(member => {
     const agentType = member.agentType || 'general-purpose'

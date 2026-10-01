@@ -68,7 +68,7 @@ import { readTraceCaptureSettings } from './traceCaptureService.js'
 import { logError } from '../../utils/log.js'
 import { composeUserContent } from '../features/managedContext/composer.js'
 import { normalizeAutoQuestionSettings } from '../../shared/autoQuestionSettings.js'
-import { decideAutoQuestionAnswers, getRecommendedQuestionAnswers, type AutoQuestion } from './autoQuestionDecisionService.js'
+import { decideAutoQuestionAnswers, type AutoQuestion } from './autoQuestionDecisionService.js'
 import {
   createImageMetadataText,
   maybeResizeAndDownsampleImageBuffer,
@@ -379,6 +379,7 @@ export class ConversationService {
     this.clearAutoAnswerWait(request)
     request.autoAnswerTimer = undefined
     request.autoAnswerAbortController = undefined
+    console.info(`[ConversationService] Automatic answer cancelled by user activity: session=${sessionId} request=${requestId}`)
     request.autoAnswerCancelled = true
     request.autoAnswerGeneration = (request.autoAnswerGeneration ?? 0) + 1
   }
@@ -415,6 +416,7 @@ export class ConversationService {
 
       const remainingMs = Math.max(0, (request.autoAnswerCreatedAt ?? Date.now()) +
         settings.timeoutMinutes * 60_000 - Date.now())
+      console.info(`[ConversationService] Automatic answer scheduled: session=${sessionId} request=${requestId} remainingMs=${remainingMs}`)
       request.autoAnswerTimer = setTimeout(() => {
         request.autoAnswerTimer = undefined
         void this.autoAnswerQuestion(sessionId, session, requestId, request)
@@ -432,15 +434,18 @@ export class ConversationService {
   ): Promise<void> {
     if (request.autoAnswerCancelled || this.sessions.get(sessionId) !== session ||
       session.pendingPermissionRequests.get(requestId) !== request) return
+    const skip = (reason: string) => {
+      console.info(`[ConversationService] Automatic answer left pending: session=${sessionId} request=${requestId} reason=${reason}`)
+    }
     const controller = new AbortController()
     request.autoAnswerAbortController = controller
     try {
       const settings = normalizeAutoQuestionSettings(
         (await new SettingsService().getUserSettings()).autoQuestion,
       )
-      if (!settings.enabled) return
+      if (!settings.enabled) return skip('disabled')
       const questions = parseAutoQuestions(request.input)
-      if (!questions) return
+      if (!questions) return skip('invalid_questions')
       const { messages } = await sessionService.getSessionHistoryPage(sessionId, {
         limit: 60,
         projectContext: false,
@@ -456,21 +461,19 @@ export class ConversationService {
       const conversationText = request.agentId
         ? `${rootContext.slice(-2_000)}\n${agentContext.slice(-2_000)}`
         : rootContext
-      if (Object.keys(getRecommendedQuestionAnswers(questions)).length !== questions.length &&
-        !(request.agentId ? agentContext.trim() : rootContext.trim())) return
+      if (!(request.agentId ? agentContext.trim() : rootContext.trim())) return skip('missing_context')
       const launchInfo = await sessionService.getSessionLaunchInfo(sessionId).catch(() => null)
       const providerId = session.providerId !== undefined
         ? session.providerId
         : launchInfo?.runtimeProviderId ?? null
-      if (providerId === null && session.usesOfficialOAuth === false &&
-        Object.keys(getRecommendedQuestionAnswers(questions)).length !== questions.length) return
+      if (providerId === null && session.usesOfficialOAuth === false) return skip('missing_provider')
       // The CLI keeps its launch-time provider configuration. Never send its
       // conversation to a provider address or account edited while it waited.
-      if (providerId && session.providerConfigFingerprint &&
-        Object.keys(getRecommendedQuestionAnswers(questions)).length !== questions.length) {
+      if (providerId && session.providerConfigFingerprint) {
         const current = await this.providerService.getProvider(providerId)
-        if (JSON.stringify(current) !== session.providerConfigFingerprint) return
+        if (JSON.stringify(current) !== session.providerConfigFingerprint) return skip('provider_changed')
       }
+      console.info(`[ConversationService] Automatic answer decision started: session=${sessionId} request=${requestId}`)
       const answers = await decideAutoQuestionAnswers({
         questions,
         conversationText,
@@ -478,7 +481,8 @@ export class ConversationService {
         sessionId,
         signal: controller.signal,
       })
-      if (!answers || request.autoAnswerCancelled || controller.signal.aborted || this.sessions.get(sessionId) !== session ||
+      if (!answers) return skip('no_valid_model_answer')
+      if (request.autoAnswerCancelled || controller.signal.aborted || this.sessions.get(sessionId) !== session ||
         session.pendingPermissionRequests.get(requestId) !== request) return
       if (!normalizeAutoQuestionSettings(
         (await new SettingsService().getUserSettings()).autoQuestion,

@@ -155,6 +155,7 @@ export type ServerMessage =
   | { type: 'status'; state: ChatState; verb?: string; attemptStart?: boolean }
   | {
       type: typeof RUNTIME_CONFIG_APPLIED_EVENT
+      requestedConfig?: { providerId: string | null; modelId: string; effortLevel?: string }
       providerId: string | null
       modelId: string
       effortLevel?: string

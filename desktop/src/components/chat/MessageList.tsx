@@ -28,6 +28,7 @@ import type { ActivityStep } from './activityGroupModel'
 import { ToolResultBlock } from './ToolResultBlock'
 import { PermissionDialog } from './PermissionDialog'
 import { AskUserQuestion } from './AskUserQuestion'
+import { RenderItemBoundary } from './RenderItemBoundary'
 import { StreamingIndicator } from './StreamingIndicator'
 import { InlineTaskSummary } from './InlineTaskSummary'
 import { CurrentTurnChangeCard } from './CurrentTurnChangeCard'
@@ -3555,70 +3556,72 @@ export function MessageList({
 
     return (
       <>
-        {item.kind === 'tool_group' ? (
-          <ToolCallGroup
-            sessionId={resolvedSessionId}
-            onOpenAgentRun={onOpenAgentRun}
-            resolveAgentActivityTarget={resolveAgentActivityTarget}
-            toolCalls={item.toolCalls}
-            steps={item.steps}
-            resultMap={toolResultMap}
-            childToolCallsByParent={childToolCallsByParent}
-            agentTaskNotifications={agentTaskNotifications}
-            agentTaskStatuses={agentTaskStatuses}
-            activeThinkingId={activeThinkingId}
-            isStreaming={
-              chatState === 'tool_executing' &&
-              item.toolCalls.some((tc) => !toolResultMap.has(tc.toolUseId))
-            }
-            // Only the tail of a live turn can still grow. Everything above it
-            // is finished, whatever any individual tool's state looks like this
-            // instant — which is why this, and not `isStreaming`, decides
-            // whether a run stands open.
-            isLive={chatState !== 'idle' && index === renderItems.length - 1 && !hasTrailingStreamingItem}
-            disclosureKey={getRenderItemKey(item)}
-          />
-        ) : item.kind === 'team_card' ? (
-          resolvedSessionId ? (() => {
-            const cardSnapshot = snapshotForTeamCard(teamSnapshot, item)
-            const fallbackPhase = item.endedAt !== undefined || teamTaskWindows.some((window) => (
-              item.startedAt >= window.startedAt &&
-              window.endedAt !== undefined &&
-              item.startedAt <= window.endedAt
-            )) ? 'completed' : 'forming'
-            return (
-            <AgentTeamsInlineCard
-              snapshot={cardSnapshot}
-              teamName={item.teamName}
-              fallbackPhase={fallbackPhase}
-              phaseOverride={item.endedAt !== undefined ? 'completed' : undefined}
-              onOpen={cardSnapshot
-                ? () => openTeamWorkbench(resolvedSessionId, cardSnapshot.team.name)
-                : undefined}
-            >
-              <TeamCoordinationAudit toolCalls={item.coordinationToolCalls} />
-            </AgentTeamsInlineCard>
-            )
-          })() : null
-        ) : (
-          <MessageBlock
-            sessionId={resolvedSessionId}
-            message={item.message}
-            team={memberSessionTeam ?? undefined}
-            activeThinkingId={activeThinkingId}
-            agentTaskNotifications={agentTaskNotifications}
-            toolResult={
-              item.message.type === 'tool_use'
-                ? toolResultByToolUseId.get(item.message.toolUseId) ?? null
-                : null
-            }
-            branchAction={branchActionByMessageId.get(item.message.id)}
-            turnChangedFiles={changedFilesByRenderIndex.get(index)}
-            isTurnOutputOwner={turnOutputOwnerIndexes.has(index)}
-            turnCompletion={turnCompletionByMessageId.get(item.message.id)}
-            supersededAskUserQuestionIds={supersededAskUserQuestionIds}
-          />
-        )}
+        <RenderItemBoundary>
+          {item.kind === 'tool_group' ? (
+            <ToolCallGroup
+              sessionId={resolvedSessionId}
+              onOpenAgentRun={onOpenAgentRun}
+              resolveAgentActivityTarget={resolveAgentActivityTarget}
+              toolCalls={item.toolCalls}
+              steps={item.steps}
+              resultMap={toolResultMap}
+              childToolCallsByParent={childToolCallsByParent}
+              agentTaskNotifications={agentTaskNotifications}
+              agentTaskStatuses={agentTaskStatuses}
+              activeThinkingId={activeThinkingId}
+              isStreaming={
+                chatState === 'tool_executing' &&
+                item.toolCalls.some((tc) => !toolResultMap.has(tc.toolUseId))
+              }
+              // Only the tail of a live turn can still grow. Everything above it
+              // is finished, whatever any individual tool's state looks like this
+              // instant — which is why this, and not `isStreaming`, decides
+              // whether a run stands open.
+              isLive={chatState !== 'idle' && index === renderItems.length - 1 && !hasTrailingStreamingItem}
+              disclosureKey={getRenderItemKey(item)}
+            />
+          ) : item.kind === 'team_card' ? (
+            resolvedSessionId ? (() => {
+              const cardSnapshot = snapshotForTeamCard(teamSnapshot, item)
+              const fallbackPhase = item.endedAt !== undefined || teamTaskWindows.some((window) => (
+                item.startedAt >= window.startedAt &&
+                window.endedAt !== undefined &&
+                item.startedAt <= window.endedAt
+              )) ? 'completed' : 'forming'
+              return (
+              <AgentTeamsInlineCard
+                snapshot={cardSnapshot}
+                teamName={item.teamName}
+                fallbackPhase={fallbackPhase}
+                phaseOverride={item.endedAt !== undefined ? 'completed' : undefined}
+                onOpen={cardSnapshot
+                  ? () => openTeamWorkbench(resolvedSessionId, cardSnapshot.team.name)
+                  : undefined}
+              >
+                <TeamCoordinationAudit toolCalls={item.coordinationToolCalls} />
+              </AgentTeamsInlineCard>
+              )
+            })() : null
+          ) : (
+            <MessageBlock
+              sessionId={resolvedSessionId}
+              message={item.message}
+              team={memberSessionTeam ?? undefined}
+              activeThinkingId={activeThinkingId}
+              agentTaskNotifications={agentTaskNotifications}
+              toolResult={
+                item.message.type === 'tool_use'
+                  ? toolResultByToolUseId.get(item.message.toolUseId) ?? null
+                  : null
+              }
+              branchAction={branchActionByMessageId.get(item.message.id)}
+              turnChangedFiles={changedFilesByRenderIndex.get(index)}
+              isTurnOutputOwner={turnOutputOwnerIndexes.has(index)}
+              turnCompletion={turnCompletionByMessageId.get(item.message.id)}
+              supersededAskUserQuestionIds={supersededAskUserQuestionIds}
+            />
+          )}
+        </RenderItemBoundary>
 
 
         {resolvedSessionId && cardsForItem.map((card) => {

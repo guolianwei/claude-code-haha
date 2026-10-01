@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { getEventListeners } from 'node:events'
 import { appendFile, chmod, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -772,6 +773,100 @@ describe('local index coordinator', () => {
       expect(upgradedCoordinator.getActivityStats('all')?.totalMessages).toBe(1)
       expect(upgradedCoordinator.getSessionEntryLocators?.(source.path)?.source.parserVersion)
         .toBe(SESSION_SUMMARY_PARSER_VERSION)
+    } finally {
+      await upgradedCoordinator.stop()
+    }
+  })
+
+  it('replaces persisted per-model dollars with the current rates after a parser upgrade', async () => {
+    // Version 9 corrected the Sonnet 5 / Sonnet 5.5 / Opus 5.5 rates. Dollars are persisted per model,
+    // so without a parser bump every already-indexed transcript would keep its old price forever.
+    expect(SESSION_SUMMARY_PARSER_VERSION).toBeGreaterThanOrEqual(9)
+
+    const root = await createTempDir('coordinator-activity-cost-upgrade')
+    const configDir = join(root, 'config')
+    const databasePath = join(configDir, 'cc-haha', 'db', 'index-v1.sqlite')
+    const transcriptPath = join(configDir, 'projects', '-repo', 'cost-upgrade.jsonl')
+    await mkdir(dirname(transcriptPath), { recursive: true })
+    await writeFile(transcriptPath, [
+      {
+        type: 'user',
+        message: { role: 'user', content: 'Price this' },
+        timestamp: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        type: 'assistant',
+        requestId: 'req_cost_upgrade',
+        message: {
+          id: 'msg_cost_upgrade',
+          role: 'assistant',
+          model: 'claude-sonnet-5',
+          content: [{ type: 'text', text: 'Priced' }],
+          usage: { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        },
+        timestamp: '2026-01-01T00:00:01.000Z',
+      },
+    ].map(entry => JSON.stringify(entry)).join('\n') + '\n')
+
+    const createIdleWatcher = (): ReconciliationWatcher => ({
+      async start() {},
+      async stop() {},
+      queueTranscriptPath() {},
+      queueFullSweep() {},
+      getMetrics: () => ({
+        queuedPaths: 0,
+        maxBatchSize: 0,
+        yielded: 0,
+        fullSweeps: 0,
+        watchFailures: 0,
+      }),
+    })
+    const previousCoordinator = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => databasePath,
+      createProjector: options => createSessionProjector({
+        ...options,
+        parserVersion: SESSION_SUMMARY_PARSER_VERSION - 1,
+      }),
+      createWatcher: createIdleWatcher,
+    })
+    await previousCoordinator.start()
+    await waitFor(() => previousCoordinator.isActivityScopeReady())
+    await previousCoordinator.stop()
+
+    // Leave behind what the previous release persisted: Sonnet 5 at the old $3/$15 rate.
+    const staleDatabase = new Database(databasePath)
+    try {
+      staleDatabase.run(
+        "UPDATE activity_daily_models SET cost_usd = 18 WHERE model = 'claude-sonnet-5'",
+      )
+      expect(staleDatabase.query<{ cost_usd: number }, []>(
+        "SELECT cost_usd FROM activity_daily_models WHERE model = 'claude-sonnet-5'",
+      ).get()?.cost_usd).toBe(18)
+    } finally {
+      staleDatabase.close()
+    }
+
+    let runScheduledDiscovery: (() => void) | undefined
+    const upgradedCoordinator = createLocalIndexCoordinator({
+      resolveMode: () => ({ mode: 'on', warningCode: null }),
+      resolveScope: () => configDir,
+      resolveDatabasePath: () => databasePath,
+      schedule: operation => { runScheduledDiscovery = operation },
+      createWatcher: createIdleWatcher,
+    })
+
+    try {
+      await upgradedCoordinator.start()
+      // The stale dollars are withheld until the rebuild has replaced them.
+      expect(upgradedCoordinator.getActivityStats('all')).toBeNull()
+
+      runScheduledDiscovery?.()
+      await waitFor(() => upgradedCoordinator.isActivityScopeReady())
+      // 1M input at $2 + 1M output at $10.
+      expect(upgradedCoordinator.getActivityStats('all')?.modelUsage['claude-sonnet-5']?.costUSD)
+        .toBeCloseTo(12, 6)
     } finally {
       await upgradedCoordinator.stop()
     }

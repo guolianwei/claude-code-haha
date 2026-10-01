@@ -7,7 +7,7 @@ import { createSandboxedTestEnvironment } from '../../scripts/pr/test-environmen
 import type { Tool, ToolUseContext } from '../Tool.js'
 import type { QueryParams } from '../query.js'
 
-const scenarios = ['chat-eof', 'chat-length', 'chat-error', 'chat-completed', 'responses-incomplete', 'responses-failed', 'responses-done-only', 'anthropic-duplicate', 'anthropic-eof', 'anthropic-truncated'] as const
+const scenarios = ['chat-eof', 'chat-length', 'chat-error', 'chat-completed', 'responses-incomplete', 'responses-failed', 'responses-done-only', 'anthropic-duplicate', 'anthropic-eof', 'anthropic-truncated', 'chat-malformed-corrected', 'chat-malformed-repeated', 'chat-mixed-corrected'] as const
 type Scenario = typeof scenarios[number]
 const resultPrefix = 'PROXY_TOOL_COMMIT_RESULT:'
 const childScenario = process.env.CC_HAHA_PROXY_TOOL_COMMIT_SCENARIO
@@ -37,9 +37,16 @@ async function runScenario(root: string, scenario: Scenario) {
   let executions = 0
   const committedToolIds: string[] = []
   let requests = 0
+  let maxTurnsReached = false
+  const executedPaths: string[] = []
+  const feedback: Array<{ request: number; id: string; error: boolean; content: string }> = []
+  const correctionScenario = scenario === 'chat-malformed-corrected' || scenario === 'chat-mixed-corrected'
+  const repeatedMalformed = scenario === 'chat-malformed-repeated'
+  const malformedScenario = correctionScenario || repeatedMalformed
   const target = join(root, `${scenario}.txt`)
   const input = { file_path: target, content: 'written exactly once' }
   const args = JSON.stringify(input)
+  const malformedArgs = JSON.stringify({ file_path: target }).slice(0, -1) + ',"content": invalid}'
   const isChat = scenario.startsWith('chat-')
   let wire = isChat
     ? chatTool(args, scenario === 'chat-completed' ? 'tool_calls' : scenario === 'chat-length' ? 'length' : undefined)
@@ -59,8 +66,25 @@ async function runScenario(root: string, scenario: Scenario) {
   }
   if (scenario === 'chat-error') wire += `data: ${JSON.stringify({ error: { type: 'server_error', message: 'fixture upstream failure' } })}\n\n`
   const server = Bun.serve({ hostname: '127.0.0.1', port: 0, async fetch(request) {
-    await request.json()
+    const body = await request.json() as { messages?: Array<{ content?: unknown }> }
     requests++
+    for (const message of body.messages ?? []) {
+      if (!Array.isArray(message.content)) continue
+      for (const block of message.content) {
+        if (block?.type === 'tool_result') feedback.push({ request: requests, id: block.tool_use_id, error: block.is_error === true, content: JSON.stringify(block.content) })
+      }
+    }
+    if (malformedScenario) {
+      let calls: Array<{ id: string; arguments: string }> = []
+      if (requests === 1 || repeatedMalformed) {
+        calls = [{ id: repeatedMalformed ? `call_invalid_${requests}` : 'call_fixture', arguments: malformedArgs }]
+        if (scenario === 'chat-mixed-corrected') calls.unshift({ id: 'call_valid', arguments: JSON.stringify({ ...input, file_path: join(root, 'already-written.txt') }) })
+      } else if (requests === 2) calls = [{ id: 'call_corrected', arguments: args }]
+      const correctedWire = calls.length
+        ? chatTools(calls)
+        : `data: ${JSON.stringify({ choices: [{ delta: { content: 'complete' }, finish_reason: 'stop' }] })}\n\n`
+      return new Response(openaiChatStreamToAnthropic(upstream(correctedWire), 'fixture-model'), { headers: { 'content-type': 'text/event-stream' } })
+    }
     const stream = requests === 1
       ? (scenario.startsWith('anthropic-') ? upstream(wire) : isChat ? openaiChatStreamToAnthropic(upstream(wire), 'fixture-model') : openaiResponsesStreamToAnthropic(upstream(wire), 'fixture-model'))
       : openaiChatStreamToAnthropic(upstream(`data: ${JSON.stringify({ choices: [{ delta: { content: 'complete' }, finish_reason: 'stop' }] })}\n\n`), 'fixture-model')
@@ -73,6 +97,7 @@ async function runScenario(root: string, scenario: Scenario) {
     isEnabled: () => true, userFacingName: () => 'fixture write', description: async () => 'Write a fixture file',
     call: async (value: typeof input) => {
       executions++
+      executedPaths.push(value.file_path)
       await writeFile(value.file_path, value.content)
       return { data: 'written' }
     },
@@ -92,18 +117,19 @@ async function runScenario(root: string, scenario: Scenario) {
     messages: [createUserMessage({ content: 'Run the fixture write once' })],
     systemPrompt: asSystemPrompt([]), userContext: {}, systemContext: {},
     canUseTool: async (_tool, value) => ({ behavior: 'allow', updatedInput: value }),
-    toolUseContext, querySource: 'sdk', maxTurns: 2,
+    toolUseContext, querySource: 'sdk', maxTurns: malformedScenario ? 3 : 2,
     deps: { callModel, microcompact: async messages => ({ messages }), autocompact: async () => ({}), uuid: randomUUID },
   }
   try {
     for await (const message of query(params)) {
+      if (message.type === 'attachment' && message.attachment.type === 'max_turns_reached') maxTurnsReached = true
       if (message.type === 'assistant') {
         for (const block of message.message.content) {
           if (block.type === 'tool_use') committedToolIds.push(block.id)
         }
       }
     }
-    return { executions, requests, committedToolIds }
+    return { executions, requests, committedToolIds, executedPaths, feedback, maxTurnsReached }
   } finally {
     toolUseContext.abortController.abort()
     server.stop(true)
@@ -121,6 +147,12 @@ function upstream(text: string): ReadableStream<Uint8Array> {
 
 function event(type: string, fields: Record<string, unknown>): string {
   return `event: ${type}\ndata: ${JSON.stringify({ type, ...fields })}\n\n`
+}
+
+function chatTools(calls: Array<{ id: string; arguments: string }>): string {
+  return `data: ${JSON.stringify({ choices: [{ index: 0, delta: { tool_calls: calls.map((call, index) => ({
+    index, id: call.id, type: 'function', function: { name: 'FixtureWrite', arguments: call.arguments },
+  })) }, finish_reason: 'tool_calls' }] })}\n\n`
 }
 
 function chatTool(argumentsJson: string, finish?: string): string {
@@ -180,6 +212,33 @@ for (const scenario of scenarios) {
       const resultLine = stdout.split('\n').find(line => line.startsWith(resultPrefix))
       expect(resultLine, stdout + stderr).toBeDefined()
       const result = JSON.parse(resultLine!.slice(resultPrefix.length))
+      if (scenario === 'chat-malformed-corrected' || scenario === 'chat-mixed-corrected' || scenario === 'chat-malformed-repeated') {
+        const mixed = scenario === 'chat-mixed-corrected'
+        const repeated = scenario === 'chat-malformed-repeated'
+        expect(result.requests).toBe(3)
+        expect(result.maxTurnsReached).toBe(repeated)
+        expect(result.executions).toBe(repeated ? 0 : mixed ? 2 : 1)
+        expect(result.committedToolIds).toEqual(repeated
+          ? ['call_invalid_1', 'call_invalid_2', 'call_invalid_3']
+          : mixed ? ['call_valid', 'call_fixture', 'call_corrected'] : ['call_fixture', 'call_corrected'])
+        const invalidId = repeated ? 'call_invalid_1' : 'call_fixture'
+        expect(result.feedback).toContainEqual({ request: 2, id: invalidId, error: true, content: expect.stringContaining('InputValidationError') })
+        const target = join(root, `${scenario}.txt`)
+        if (repeated) {
+          expect(result.executedPaths).toEqual([])
+          expect(await Bun.file(target).exists()).toBe(false)
+          expect(result.feedback).toContainEqual({ request: 3, id: 'call_invalid_2', error: true, content: expect.stringContaining('InputValidationError') })
+        } else {
+          expect(await readFile(target, 'utf8')).toBe('written exactly once')
+          expect(result.executedPaths).toEqual(mixed ? [join(root, 'already-written.txt'), target] : [target])
+          expect(result.feedback).toContainEqual({ request: 3, id: 'call_corrected', error: false, content: JSON.stringify('written') })
+          if (mixed) {
+            expect(await readFile(join(root, 'already-written.txt'), 'utf8')).toBe('written exactly once')
+            expect(result.feedback).toContainEqual({ request: 2, id: 'call_valid', error: false, content: JSON.stringify('written') })
+          }
+        }
+        return
+      }
       const success = scenario === 'chat-completed' || scenario === 'responses-done-only' || scenario === 'anthropic-duplicate'
       expect(result.executions).toBe(success ? 1 : 0)
       expect(result.committedToolIds).toEqual(success ? ['call_fixture'] : [])

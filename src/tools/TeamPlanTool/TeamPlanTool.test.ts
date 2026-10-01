@@ -52,6 +52,31 @@ afterEach(async () => {
 })
 
 describe('whole-team planning tools', () => {
+  test('headless team creation records the executing model when AppState has no model', async () => {
+    context.setAppState(state => ({ ...state, mainLoopModel: null, mainLoopModelForSession: null }))
+    context.options.mainLoopModel = 'executing-model'
+    const created = await TeamCreateTool.call({ team_name: 'review-team', plan: {
+      members: [{ id: 'worker', name: 'worker', prompt: 'Work' }],
+      tasks: [{ id: 'work', subject: 'Work', ownerId: 'worker', dependencies: [] }],
+    } }, context)
+    expect((await readTeamFileAsync('review-team'))?.members[0]?.model).toBe('executing-model')
+    const plan = (await readTeamPlan('review-team'))!
+    expect(plan.leaderRuntime.modelId).toBe('executing-model')
+    expect(created.data.plan?.members[0]?.runtime.modelId).toBe('executing-model')
+  })
+
+  test('plan replacement follows the executing model after SDK model changes despite stale state and launch environment', async () => {
+    const created = await TeamCreateTool.call({ team_name: 'review-team' }, context)
+    context.options.mainLoopModel = 'changed-executing-model'
+    await TeamPlanTool.call({ team_name: 'review-team', operation: 'replace', expected_revision: created.data.plan!.revision, plan: {
+      members: [{ id: 'worker', name: 'worker', prompt: 'Work' }],
+      tasks: [{ id: 'work', subject: 'Work', ownerId: 'worker', dependencies: [] }],
+    } }, context)
+    const plan = (await readTeamPlan('review-team'))!
+    expect(plan.leaderRuntime.modelId).toBe('changed-executing-model')
+    expect(plan.members[0]?.runtime.modelId).toBe('changed-executing-model')
+  })
+
   test('review instructions describe the actual draft and execution states', () => {
     expect(getPrompt()).toContain('Human review before execution')
     expect(getPrompt()).toContain('Member names may contain letters, numbers, underscores and hyphens only')

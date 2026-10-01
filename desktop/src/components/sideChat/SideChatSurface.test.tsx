@@ -5,6 +5,14 @@ import { useSideChatStore } from '@/stores/sideChatStore'
 vi.mock('@/components/chat/ChatInput', () => ({ ChatInput: ({ sessionId, visible }: { sessionId: string; visible: boolean }) => <div data-testid="composer" data-session={sessionId} data-visible={String(visible)} /> }))
 vi.mock('@/components/chat/MessageList', () => ({ MessageList: ({ sessionId }: { sessionId: string }) => <div data-testid="messages" data-session={sessionId} /> }))
 beforeEach(() => useSideChatStore.setState({ entries: { child: { sessionId: 'child', parentSessionId: 'parent', workDir: '/repo', title: 'Side chat', ephemeral: true } } }))
+it('constrains the message list to the space above the composer', () => {
+  render(<SideChatSurface parentSessionId="parent" sideChatId="child" />)
+  // MessageList uses flex-1 and an h-full scroll area. Without a flex parent,
+  // long conversations grow behind overflow-hidden instead of scrolling.
+  const viewport = screen.getByTestId('messages').parentElement!
+  expect([...viewport.classList]).toEqual(expect.arrayContaining(['flex', 'flex-col', 'flex-1', 'min-h-0', 'overflow-hidden']))
+  expect(viewport.nextElementSibling).toBe(screen.getByTestId('composer'))
+})
 it('binds both full conversation components to child scope and retains it while hidden', () => {
   const close = vi.spyOn(useSideChatStore.getState(), 'close')
   const view = render(<SideChatSurface parentSessionId="parent" sideChatId="child" />)

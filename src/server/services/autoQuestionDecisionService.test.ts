@@ -9,7 +9,6 @@ import { hahaOpenAIOAuthService } from './hahaOpenAIOAuthService.js'
 import { hahaGrokOAuthService } from './hahaGrokOAuthService.js'
 import {
   decideAutoQuestionAnswers,
-  getRecommendedQuestionAnswers,
   type AutoQuestion,
 } from './autoQuestionDecisionService.js'
 
@@ -50,33 +49,7 @@ describe('autoQuestionDecisionService', () => {
     await fs.rm(configDir, { recursive: true, force: true })
   })
 
-  test('uses only a unique explicit Recommended suffix', () => {
-    expect(getRecommendedQuestionAnswers([recommended])).toEqual({
-      'Which approach?': 'Use cache (Recommended)',
-    })
-    expect(getRecommendedQuestionAnswers([
-      { ...recommended, question: 'Ambiguous?', options: [
-        { label: 'One (Recommended)' }, { label: 'Two (Recommended)' },
-      ] },
-      { ...recommended, question: 'Description only?', options: [
-        { label: 'One', description: 'Recommended' }, { label: 'Two' },
-      ] },
-      { ...recommended, question: 'Not a suffix?', options: [
-        { label: '(Recommended) One' }, { label: 'Two' },
-      ] },
-    ])).toEqual({})
-  })
-
-  test('answers explicit recommendations without contacting a provider', async () => {
-    expect(await decideAutoQuestionAnswers({
-      questions: [recommended],
-      conversationText: '',
-      providerId: null,
-      signal: new AbortController().signal,
-    })).toEqual({ 'Which approach?': 'Use cache (Recommended)' })
-  })
-
-  test('asks the session Haiku model only for unresolved questions', async () => {
+  test('asks the session Haiku model for every question including explicit recommendations', async () => {
     const bodies: Array<Record<string, any>> = []
     const headers: Headers[] = []
     const server = Bun.serve({
@@ -86,7 +59,7 @@ describe('autoQuestionDecisionService', () => {
         headers.push(req.headers)
         bodies.push(await req.json() as Record<string, any>)
         return Response.json({
-          content: [{ type: 'text', text: '{"answers":[{"questionIndex":0,"optionLabels":["JSON"]}]}' }],
+          content: [{ type: 'text', text: '{"answers":[{"questionIndex":0,"optionLabels":["Use cache (Recommended)"]},{"questionIndex":1,"optionLabels":["JSON"]}]}' }],
         })
       },
     })
@@ -110,8 +83,58 @@ describe('autoQuestionDecisionService', () => {
       expect(bodies[0]?.model).toBe('small-test')
       expect(bodies[0]?.thinking).toEqual({ type: 'disabled' })
       expect(bodies[0]?.messages?.[0]?.content).toContain('machine readable output')
-      expect(bodies[0]?.messages?.[0]?.content).not.toContain('Which approach?')
+      expect(bodies[0]?.messages?.[0]?.content).toContain('Which approach?')
       expect(headers[0]?.get('x-api-key')).toBe('fake-key')
+    } finally {
+      server.stop(true)
+    }
+  })
+
+  test('passes natural-language recommendations to the model and never invents answers locally', async () => {
+    const bodies: Array<Record<string, any>> = []
+    let modelText = ''
+    const server = Bun.serve({
+      hostname: '127.0.0.1', port: 0,
+      async fetch(req) {
+        bodies.push(await req.json() as Record<string, any>)
+        return Response.json({ content: [{ type: 'text', text: modelText }] })
+      },
+    })
+    try {
+      const provider = await new ProviderService().addProvider({
+        presetId: 'custom', name: 'Fixture', apiKey: 'fake-key', authStrategy: 'api_key',
+        baseUrl: `http://127.0.0.1:${server.port}`, apiFormat: 'anthropic',
+        models: { main: 'large-test', haiku: 'small-test', sonnet: 'large-test', opus: 'large-test' },
+      })
+      for (const option of [
+        { label: '选项 A（推荐）' },
+        { label: '建议采用缓存方案' },
+        { label: 'Cache', description: 'こちらの選択肢をお勧めします' },
+      ]) {
+        const question = { ...recommended, options: [option, { label: 'Alternative' }] }
+        modelText = JSON.stringify({ answers: [{ questionIndex: 0, optionLabels: ['Alternative'] }] })
+        expect(await decideAutoQuestionAnswers({
+          questions: [question], conversationText: 'Prefer a fresh result.', providerId: provider.id,
+          signal: new AbortController().signal,
+        })).toEqual({ [question.question]: 'Alternative' })
+        const prompt = bodies.at(-1)?.messages?.[0]?.content
+        expect(prompt).toContain(option.label)
+        if ('description' in option) expect(prompt).toContain(option.description)
+        expect(prompt).toContain('recommendations expressed naturally in any language')
+      }
+      expect(bodies).toHaveLength(3)
+      for (const invalid of [
+        { answers: [{ questionIndex: 0, optionLabels: ['Invented answer'] }] },
+        { answers: [] },
+        { answers: [{ questionIndex: 0, optionLabels: ['Use cache (Recommended)', 'Fetch again'] }] },
+      ]) {
+        modelText = JSON.stringify(invalid)
+        expect(await decideAutoQuestionAnswers({
+          questions: [recommended], conversationText: '', providerId: provider.id,
+          signal: new AbortController().signal,
+        })).toBeNull()
+      }
+      expect(bodies).toHaveLength(6)
     } finally {
       server.stop(true)
     }

@@ -138,7 +138,7 @@ describe('AgentTeamsPlanCard', () => {
     }
   })
 
-  it('saves before confirming and disables approval after launch', async () => {
+  it('saves before confirming and dismisses the review card and dialog after approval', async () => {
     await open()
     fireEvent.click(screen.getByRole('button', { name: 'Builder · Provider and model' }))
     vi.mocked(teamPlansApi.save).mockResolvedValue({ plan: { ...fixture(), revision: 2 } })
@@ -147,6 +147,8 @@ describe('AgentTeamsPlanCard', () => {
     await waitFor(() => expect(teamPlansApi.act).toHaveBeenCalledOnce())
     expect(vi.mocked(teamPlansApi.act).mock.calls[0]![0].revision).toBe(2)
     expect(screen.queryByRole('button', { name: 'Approve and launch' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Review configuration' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('keeps local choices after background revision change and blocks stale approval', async () => {
@@ -196,20 +198,29 @@ describe('AgentTeamsPlanCard', () => {
     }
   })
 
-  it.each(['launching', 'running'] as const)('offers an explicit stop while %s even when the leader is idle', async state => {
+  it.each(['launching', 'running'] as const)('does not restore the pinned review for an already approved %s plan', async state => {
     vi.mocked(teamPlansApi.get).mockResolvedValue({ plan: { ...fixture(), state } })
-    const stop = vi.spyOn(useChatStore.getState(), 'stopGeneration').mockImplementation(() => {})
-    try {
-      await open()
-      fireEvent.click(screen.getByRole('button', { name: 'Stop team and main task' }))
-      expect(stop).toHaveBeenCalledExactlyOnceWith('session')
-      const stopping = screen.getByRole('button', { name: 'Stopping team and main task…' })
-      expect(stopping).toBeDisabled()
-      fireEvent.click(stopping)
-      expect(stop).toHaveBeenCalledOnce()
-    } finally {
-      stop.mockRestore()
-    }
+    const { container } = render(<AgentTeamsPlanCard sessionId="session" />)
+    await waitFor(() => expect(useTeamPlanStore.getState().bySession.session?.plan?.state).toBe(state))
+    expect(container).toBeEmptyDOMElement()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('restores review access after a launch failure or new review without reopening the approved dialog', async () => {
+    await open()
+    vi.mocked(teamPlansApi.act).mockResolvedValue({ plan: { ...fixture(), revision: 2, state: 'launching' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Approve and launch' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Review configuration' })).not.toBeInTheDocument())
+    vi.mocked(teamPlansApi.get).mockResolvedValue({ plan: { ...fixture(), revision: 3, state: 'launch_failed', launch: { status: 'failed', error: 'Launch unavailable' } } })
+    await act(async () => { await useTeamPlanStore.getState().refresh('session') })
+    expect(screen.getByRole('button', { name: 'Review configuration' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Review configuration' }))
+    expect(screen.getByRole('button', { name: 'Review again' })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Launch unavailable')
+    vi.mocked(teamPlansApi.get).mockResolvedValue({ plan: { ...fixture(), revision: 4, state: 'review_pending' } })
+    await act(async () => { await useTeamPlanStore.getState().refresh('session') })
+    expect(screen.getByRole('button', { name: 'Approve and launch' })).toBeEnabled()
   })
 
 })

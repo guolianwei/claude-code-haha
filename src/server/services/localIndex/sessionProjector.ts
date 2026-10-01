@@ -36,9 +36,12 @@ import type {
 // 4: usage copied into a fork is excluded from the fork's activity projection.
 // 5: protocol-lock metadata was projected into session summaries.
 // 6: protocol enforcement was removed; rebuild v5 summaries without protocol restrictions.
-// 7: upstream team-worker filtering and fork managed-context title sanitization.
-// 8: rebuild both v7 projections with both behaviors after the upstream merge.
-export const SESSION_SUMMARY_PARSER_VERSION = 8
+// 7: independent desktop team workers remain addressable but leave sidebar listings.
+// 8: fork merged team-worker filtering with managed-context title sanitization;
+//    upstream v8 clears the previous effort on complete runtime selections.
+// 9: usage cost rates were corrected (Sonnet 5, Sonnet 5.5, Opus 5.5, fast mode).
+// 10: rebuild both fork and upstream projections with all of these behaviors.
+export const SESSION_SUMMARY_PARSER_VERSION = 10
 
 export type SessionSourceCandidate = {
   path: string

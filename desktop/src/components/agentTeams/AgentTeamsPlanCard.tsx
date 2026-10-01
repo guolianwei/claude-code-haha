@@ -48,7 +48,14 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
     return () => window.clearInterval(interval)
   }, [refresh, sessionId])
 
-  if (!plan) return null
+  const approved = plan?.state === 'launching' || plan?.state === 'running'
+  useEffect(() => {
+    if (approved) setOpen(false)
+  }, [approved])
+
+  // Keep polling for failed launches and subsequent reviews, but release the
+  // composer once approval has handed control to the running team.
+  if (!plan || approved) return null
   const leaderRuntime = currentLeaderSelection ? runtimeFor(currentLeaderSelection) : plan.leaderRuntime
   const agents = Object.entries(plan.agentCatalog ?? {}).map(([agentType, definition]) => ({ agentType, ...definition }))
   const draft = entry.draft
@@ -59,7 +66,7 @@ export function AgentTeamsPlanCard({ sessionId }: { sessionId: string }) {
   const hasUnassignedTasks = tasks.some(task => !members.some(member => member.id === task.ownerId))
   const invalidNames = members.filter(member => !isValidTeamMemberName(member.name)).map(member => member.name)
   const presetChanged = members.some(member => plan.members.find(previous => previous.id === member.id)?.agentType !== member.agentType)
-  const canStop = plan.state === 'launching' || plan.state === 'running' || Boolean(plan.parentPlanId)
+  const canStop = Boolean(plan.parentPlanId)
   const editable = plan.state === 'review_pending' && !entry.busy && !entry.conflict
   const runtimeName = (runtime: TeamPlanRuntime) => {
     const provider = runtime.providerId === CLAUDE_OFFICIAL_PROVIDER_ID

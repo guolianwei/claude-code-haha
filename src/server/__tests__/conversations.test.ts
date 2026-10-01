@@ -3570,12 +3570,12 @@ describe('WebSocket Chat Integration', () => {
         sessionId,
         options: {
           providerId: null,
-          model: 'claude-sonnet-5',
+          model: 'claude-sonnet-5-5',
         },
       })
       await expect(sessionService.getSessionLaunchInfo(sessionId)).resolves.toMatchObject({
         runtimeProviderId: null,
-        runtimeModelId: 'claude-sonnet-5',
+        runtimeModelId: 'claude-sonnet-5-5',
       })
     } finally {
       conversationService.startSession = originalStartSession
@@ -5687,14 +5687,23 @@ describe('WebSocket Chat Integration', () => {
     }
   }, 20_000)
 
-  it('should ignore stale persisted runtime provider ids when resuming old sessions', async () => {
+  it.each([[undefined, true], ['high', true], [undefined, false], ['high', false]] as const)(
+    'should recover a deleted runtime provider with saved effort %s (replayed %s) and acknowledge the effective runtime',
+    async (savedEffort, replaySelection) => {
     const providerService = new ProviderService()
+    const expectedModelId = savedEffort ? 'current-main[1m]' : 'current-main'
+    const settingsService = new SettingsService()
+    const previousSettings = await settingsService.getUserSettings()
+    const previousManagedSettings = await providerService.getManagedSettings()
+    await settingsService.updateUserSettings({ effort: 'medium' })
+    await providerService.updateManagedSettings({ model: undefined, modelContext: undefined })
     const activeProvider = await providerService.addProvider({
       presetId: 'custom',
       name: 'Current Valid Provider',
       apiKey: 'key-current-valid',
       baseUrl: 'http://127.0.0.1:1/anthropic',
       apiFormat: 'anthropic',
+      ...(savedEffort ? { model1mSupport: { main: true, haiku: false, sonnet: false, opus: false } } : {}),
       models: {
         main: 'current-main',
         haiku: 'current-haiku',
@@ -5713,6 +5722,12 @@ describe('WebSocket Chat Integration', () => {
     const { sessionId } = await createRes.json() as { sessionId: string }
 
     const staleProviderId = crypto.randomUUID()
+    await sessionService.appendSessionMetadata(sessionId, {
+      workDir: process.cwd(),
+      runtimeProviderId: staleProviderId,
+      runtimeModelId: 'stale-model',
+      ...(savedEffort ? { effortLevel: savedEffort } : {}),
+    })
     const originalStartSession = conversationService.startSession.bind(conversationService)
     const startCalls: Array<{
       sessionId: string
@@ -5743,11 +5758,15 @@ describe('WebSocket Chat Integration', () => {
           messages.push(msg)
 
           if (msg.type === 'connected') {
-            ws.send(JSON.stringify({
-              type: 'set_runtime_config',
-              providerId: staleProviderId,
-              modelId: 'stale-model',
-            }))
+            if (replaySelection) {
+              // A reconnect can replay the same saved selection more than once.
+              for (let replay = 0; replay < 2; replay++) ws.send(JSON.stringify({
+                type: 'set_runtime_config',
+                providerId: staleProviderId,
+                modelId: 'stale-model',
+                ...(savedEffort ? { effortLevel: savedEffort } : {}),
+              }))
+            }
             ws.send(JSON.stringify({ type: 'user_message', content: 'resume old session' }))
             return
           }
@@ -5777,15 +5796,82 @@ describe('WebSocket Chat Integration', () => {
         sessionId,
         options: {
           providerId: activeProvider.id,
+          model: expectedModelId,
+          effort: 'medium',
         },
       })
-      expect(startCalls[0]?.options?.model).not.toBe('stale-model')
+      if (replaySelection) expect(messages.filter((message) => message.type === 'runtime_config_applied')).toHaveLength(2)
+      if (replaySelection) expect(messages.find((message) => message.type === 'runtime_config_applied')).toMatchObject({
+        requestedConfig: {
+          providerId: staleProviderId,
+          modelId: 'stale-model',
+          ...(savedEffort ? { effortLevel: savedEffort } : {}),
+        },
+        providerId: activeProvider.id,
+        modelId: expectedModelId,
+        effortLevel: 'medium',
+      })
+      const launchInfo = await sessionService.getSessionLaunchInfo(sessionId)
+      expect(launchInfo).toMatchObject({
+        runtimeProviderId: activeProvider.id,
+        runtimeModelId: expectedModelId,
+        effortLevel: 'medium',
+      })
       expect(messages.some((msg) => msg.type === 'message_complete')).toBe(true)
     } finally {
       ws.close()
       conversationService.startSession = originalStartSession
       conversationService.stopSession(sessionId)
       await providerService.activateOfficial()
+      await providerService.deleteProvider(activeProvider.id)
+      await fs.writeFile(path.join(tmpDir, 'settings.json'), JSON.stringify(previousSettings), 'utf-8')
+      await providerService.updateManagedSettings({ model: undefined, modelContext: undefined, ...previousManagedSettings })
+    }
+  }, 20_000)
+
+  it('should normalize saved ChatGPT effort when the restored model no longer supports it', async () => {
+    const createRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: process.cwd() }),
+    })
+    expect(createRes.status).toBe(201)
+    const { sessionId } = await createRes.json() as { sessionId: string }
+    await sessionService.appendSessionMetadata(sessionId, {
+      workDir: process.cwd(),
+      runtimeProviderId: 'openai-official',
+      runtimeModelId: 'gpt-5.5',
+      effortLevel: 'max',
+    })
+    const originalStartSession = conversationService.startSession.bind(conversationService)
+    const startCalls: Array<{ options?: { model?: string; effort?: string; providerId?: string | null } }> = []
+    conversationService.startSession = (async function patchedStartSession(
+      sid: string,
+      workDir: string,
+      sdkUrl: string,
+      options?: { permissionMode?: string; model?: string; effort?: string; thinking?: 'enabled' | 'adaptive' | 'disabled'; providerId?: string | null },
+    ) {
+      startCalls.push({ options })
+      return originalStartSession(sid, workDir, sdkUrl, options)
+    }) as typeof conversationService.startSession
+
+    try {
+      const messages = await runTurn(sessionId, 'resume the saved ChatGPT runtime')
+      expect(messages.some((message) => message.type === 'message_complete')).toBe(true)
+      expect(startCalls).toHaveLength(1)
+      expect(startCalls[0]?.options).toMatchObject({
+        providerId: 'openai-official',
+        model: 'gpt-5.5',
+        effort: 'medium',
+      })
+      expect(await sessionService.getSessionLaunchInfo(sessionId)).toMatchObject({
+        runtimeProviderId: 'openai-official',
+        runtimeModelId: 'gpt-5.5',
+        effortLevel: 'medium',
+      })
+    } finally {
+      conversationService.startSession = originalStartSession
+      conversationService.stopSession(sessionId)
     }
   }, 20_000)
 
@@ -6054,7 +6140,7 @@ describe('WebSocket Chat Integration', () => {
     }
   }, 20_000)
 
-  it('should reject a reasoning effort that the selected ChatGPT model does not support', async () => {
+  it.each(['max', 'not-an-effort'])('should reject an explicitly requested ChatGPT effort %s that the selected model does not support', async (effortLevel) => {
     const sessionId = `chat-openai-invalid-effort-${crypto.randomUUID()}`
     await new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
@@ -6070,7 +6156,7 @@ describe('WebSocket Chat Integration', () => {
             type: 'set_runtime_config',
             providerId: 'openai-official',
             modelId: 'gpt-5.5',
-            effortLevel: 'max',
+            effortLevel,
           }))
         } else if (message.type === 'error') {
           clearTimeout(timeout)
@@ -6082,6 +6168,74 @@ describe('WebSocket Chat Integration', () => {
       ws.onerror = () => reject(new Error('WebSocket failed for invalid OpenAI effort'))
     })
   }, 10_000)
+
+  it.each([
+    { providerId: null, modelId: '', effortLevel: 'high' },
+    { providerId: null, modelId: 'mock-next', effortLevel: 'invalid' },
+    { providerId: 'openai-official', modelId: 'gpt-5.5', effortLevel: 'max' },
+  ])('does not send queued or subsequent user messages to the old runtime after rejected selection %j', async (invalidSelection) => {
+    const createRes = await fetch(`${baseUrl}/api/sessions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workDir: process.cwd() }),
+    })
+    const { sessionId } = await createRes.json() as { sessionId: string }
+    let ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+    const messages: any[] = []
+    ws.onmessage = event => messages.push(JSON.parse(String(event.data)))
+    const originalSendMessage = conversationService.sendMessage.bind(conversationService)
+    const sentContents: string[] = []
+    conversationService.sendMessage = (function (sid, content, attachments, options) {
+      if (sid === sessionId) sentContents.push(content)
+      return originalSendMessage(sid, content, attachments, options)
+    }) as typeof conversationService.sendMessage
+    const hasTurnOutcome = (since: number) => messages.slice(since).some(message =>
+      message.type === 'message_complete' || message.code === 'USER_TURN_FAILED')
+
+    try {
+      await waitUntil(() => messages.some(message => message.type === 'connected'), 'runtime rejection connection')
+      ws.send(JSON.stringify({ type: 'set_runtime_config', providerId: null, modelId: 'mock-old', effortLevel: 'high' }))
+      await waitUntil(() => messages.some(message => message.type === 'runtime_config_applied'), 'original runtime accepted')
+      ws.send(JSON.stringify({ type: 'user_message', content: 'warm original runtime' }))
+      await waitUntil(() => messages.some(message => message.type === 'message_complete'), 'original runtime completed')
+
+      for (const [index, content] of ['queued after invalid selection', 'retry while selection remains invalid'].entries()) {
+        const since = messages.length
+        if (index === 0) ws.send(JSON.stringify({ type: 'set_runtime_config', ...invalidSelection }))
+        ws.send(JSON.stringify({ type: 'user_message', content }))
+        await waitUntil(() => hasTurnOutcome(since), 'rejected runtime user turn settled')
+        expect(sentContents).toEqual(['warm original runtime'])
+        expect(messages.slice(since)).toContainEqual(expect.objectContaining({ type: 'error', code: 'USER_TURN_FAILED' }))
+        expect(messages.slice(since)).toContainEqual({ type: 'status', state: 'idle' })
+        expect(conversationService.hasSession(sessionId)).toBe(true)
+      }
+
+      ws.send(JSON.stringify({ type: 'set_runtime_config', providerId: null, modelId: 'mock-new', effortLevel: 'medium' }))
+      await waitUntil(() => messages.some(message => message.type === 'runtime_config_applied' && message.modelId === 'mock-new'), 'corrected runtime applied')
+      const since = messages.length
+      ws.send(JSON.stringify({ type: 'user_message', content: 'send with corrected runtime' }))
+      await waitUntil(() => hasTurnOutcome(since), 'corrected runtime user turn settled')
+      expect(messages.slice(since).some(message => message.type === 'message_complete')).toBe(true)
+      expect(sentContents).toEqual(['warm original runtime', 'send with corrected runtime'])
+      expect(await sessionService.getSessionLaunchInfo(sessionId)).toMatchObject({ runtimeModelId: 'mock-new', effortLevel: 'medium' })
+      const rejectedSince = messages.length
+      ws.send(JSON.stringify({ type: 'set_runtime_config', ...invalidSelection }))
+      await waitUntil(() => messages.slice(rejectedSince).some(message => message.code === 'RUNTIME_CONFIG_INVALID'), 'another rejected selection')
+      const { closeSessionConnection } = await import('../ws/handler.js')
+      closeSessionConnection(sessionId)
+      const reconnectSince = messages.length
+      ws = new WebSocket(`${wsUrl}/ws/${sessionId}`)
+      ws.onmessage = event => messages.push(JSON.parse(String(event.data)))
+      await waitUntil(() => messages.slice(reconnectSince).some(message => message.type === 'connected'), 'connection after cleanup')
+      ws.send(JSON.stringify({ type: 'user_message', content: 'send after session cleanup' }))
+      await waitUntil(() => hasTurnOutcome(reconnectSince), 'turn after cleanup settled')
+      expect(messages.slice(reconnectSince).some(message => message.type === 'message_complete')).toBe(true)
+      expect(sentContents).toEqual(['warm original runtime', 'send with corrected runtime', 'send after session cleanup'])
+    } finally {
+      ws.close()
+      conversationService.sendMessage = originalSendMessage
+      conversationService.stopSession(sessionId)
+    }
+  }, 20_000)
 
   it('should reject unsupported GLM 5.3 standard API effort aliases', async () => {
     const providerService = new ProviderService()

@@ -2,12 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
 import * as fs from 'node:fs/promises'
 import * as os from 'node:os'
 import * as path from 'node:path'
+import * as questionDecision from '../services/autoQuestionDecisionService.js'
 import { ConversationService } from '../services/conversationService.js'
 import { ProviderService } from '../services/providerService.js'
 import { sessionService } from '../services/sessionService.js'
 import { normalizeAskUserQuestionToolResult } from '../ws/cliMessageParsing.js'
 
 describe('automatic AskUserQuestion answers', () => {
+  let historyMock: ReturnType<typeof spyOn>
+  let decisionMock: ReturnType<typeof spyOn>
   let configDir: string
   const originalConfigDir = process.env.CLAUDE_CONFIG_DIR
   const originalHome = process.env.HOME
@@ -18,9 +21,16 @@ describe('automatic AskUserQuestion answers', () => {
     process.env.CLAUDE_CONFIG_DIR = configDir
     process.env.HOME = configDir
     process.env.USERPROFILE = configDir
+    historyMock = spyOn(sessionService, 'getSessionHistoryPage').mockResolvedValue({
+      messages: [{ type: 'user', content: 'Choose the recommended project option.' }],
+    } as never)
+    decisionMock = spyOn(questionDecision, 'decideAutoQuestionAnswers').mockImplementation(async ({ questions }) =>
+      Object.fromEntries(questions.map((question) => [question.question, question.options[0]!.label])))
   })
 
   afterEach(async () => {
+    historyMock.mockRestore()
+    decisionMock.mockRestore()
     if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR
     else process.env.CLAUDE_CONFIG_DIR = originalConfigDir
     if (originalHome === undefined) delete process.env.HOME
@@ -67,7 +77,7 @@ describe('automatic AskUserQuestion answers', () => {
       .toEqual({ futureField: { keep: true } })
   })
 
-  it('uses the unique recommended option and marks the answer as automatic', async () => {
+  it('submits the model choice and marks the answer as automatic', async () => {
     await fs.writeFile(path.join(configDir, 'settings.json'), JSON.stringify({
       autoQuestion: { enabled: true, timeoutMinutes: 5 },
     }))
@@ -141,6 +151,24 @@ describe('automatic AskUserQuestion answers', () => {
     }
   })
 
+  it('reports an undecidable model response and leaves the question pending', async () => {
+    await fs.writeFile(path.join(configDir, 'settings.json'), JSON.stringify({
+      autoQuestion: { enabled: true, timeoutMinutes: 1 },
+    }))
+    decisionMock.mockResolvedValue(null)
+    const info = spyOn(console, 'info').mockImplementation(() => {})
+    try {
+      const { service, session, request, sent } = createPendingService()
+      await (service as any).autoAnswerQuestion('session-1', session, 'req-1', request)
+      expect(decisionMock).toHaveBeenCalledTimes(1)
+      expect(sent).toHaveLength(0)
+      expect(service.getPendingPermissionRequests('session-1')).toHaveLength(1)
+      expect(info).toHaveBeenCalledWith(expect.stringContaining('reason=no_valid_model_answer'))
+    } finally {
+      info.mockRestore()
+    }
+  })
+
   it('removes an untrusted automatic marker from a manual answer', () => {
     const { service, request, sent } = createPendingService()
     expect(service.respondToPermission('session-1', 'req-1', true, undefined, {
@@ -164,6 +192,40 @@ describe('automatic AskUserQuestion answers', () => {
     expect((request as any).autoAnswerTimer).toBeDefined()
     expect((request as any).autoAnswerTimer).not.toBe(initialTimer)
     service.cancelAutoQuestionAnswer('session-1', 'req-1')
+  })
+
+  it('applies a five-to-one-minute change to an overdue question without restarting', async () => {
+    const settingsPath = path.join(configDir, 'settings.json')
+    await fs.writeFile(settingsPath, JSON.stringify({
+      autoQuestion: { enabled: true, timeoutMinutes: 5 },
+    }))
+    const { service, session, request, sent } = createPendingService()
+    request.input.questions[0]!.options[0]!.label = '本地（推荐）'
+    ;(request as any).autoAnswerCreatedAt = Date.now() - 2 * 60_000
+    const history = spyOn(sessionService, 'getSessionHistoryPage').mockResolvedValue({
+      messages: [{ type: 'user', content: 'Please choose the recommended option.' }],
+    } as never)
+    const launch = spyOn(sessionService, 'getSessionLaunchInfo').mockResolvedValue(null as never)
+    try {
+      await (service as any).scheduleAutoQuestionAnswer('session-1', session, 'req-1', request)
+      expect(sent).toHaveLength(0)
+      await fs.writeFile(settingsPath, JSON.stringify({
+        autoQuestion: { enabled: true, timeoutMinutes: 1 },
+      }))
+      service.refreshAutoQuestionSettings()
+      for (let i = 0; i < 100 && sent.length === 0; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 5))
+      }
+      expect(sent).toHaveLength(1)
+      expect(sent[0].response.response.updatedInput).toMatchObject({
+        answers: { 'Which scope?': '本地（推荐）' },
+        metadata: { autoAnswered: true },
+      })
+    } finally {
+      service.cancelAutoQuestionAnswer('session-1', 'req-1')
+      history.mockRestore()
+      launch.mockRestore()
+    }
   })
 
   it('cancels the deadline when the user interacts with the question', async () => {

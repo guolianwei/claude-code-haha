@@ -18,6 +18,7 @@ import { useUIStore } from '../../stores/uiStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useTeamStore } from '../../stores/teamStore'
+import { useTeamPlanStore } from '@/stores/teamPlanStore'
 import { useSettingsStore } from '../../stores/settingsStore'
 import {
   formatWorkspaceReferencePrompt,
@@ -303,6 +304,12 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
   const isMemberSession = !!memberInfo || activeTabType === 'subagent'
   const isActive = chatState !== 'idle'
   const hasRunningSubagents = hasRunningSubagentTasks(sessionState?.backgroundAgentTasks)
+  // Approved team processes are tracked by their plan, not background-agent
+  // notifications. Keep Stop available after the review card is dismissed.
+  const hasRunningTeam = useTeamPlanStore(state => {
+    const plan = activeTabId ? state.bySession[activeTabId]?.plan : undefined
+    return plan?.state === 'launching' || plan?.state === 'running'
+  })
   const workspaceState = getSessionWorkspaceState(activeSession)
   const isWorkspaceMissing = workspaceState !== 'available'
   // Both composer branches (hero and inline) and the drop handler share this:
@@ -1691,7 +1698,7 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
                   fluid
                 />
               )}
-              {!isMemberSession && !isActive && hasRunningSubagents ? (
+              {!isMemberSession && !isActive && (hasRunningSubagents || hasRunningTeam) ? (
                 <Button
                   variant="danger"
                   size="base"

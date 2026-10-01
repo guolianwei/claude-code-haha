@@ -1,4 +1,6 @@
 import { getComposerViewForTesting } from './MentionComposer'
+import { useTeamPlanStore } from '@/stores/teamPlanStore'
+import type { TeamPlanRecord } from '../../../../src/shared/teamPlan'
 import { useSideChatStore } from '@/stores/sideChatStore'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -215,6 +217,7 @@ describe('ChatInput file mentions', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     useSideChatStore.setState({ entries: {} })
+    useTeamPlanStore.setState({ bySession: {} })
     mocks.sideOpen.mockResolvedValue('side-tab')
     mocks.createRepositoryBranch.mockReset()
     act(() => {
@@ -1257,6 +1260,29 @@ describe('ChatInput file mentions', () => {
       content: 'continue while the agent runs',
       attachments: [],
     })
+  })
+
+  it.each(['launching', 'running'] as const)('offers Stop for an approved %s team with an idle lead and no background-agent notification', state => {
+    const plan: TeamPlanRecord = {
+      schemaVersion: 1, planId: 'approved-plan', sessionId, teamName: 'approved-team',
+      incarnationId: 'incarnation', revision: 2, state, workDir: '/repo', createdAt: 1, updatedAt: 2,
+      leaderRuntime: { providerId: 'fake-provider', modelId: 'fake-model' }, members: [], tasks: [],
+    }
+    const entry = { plan, loading: false, busy: false, error: null, conflict: false }
+    // Team process workers do not create local_agent/remote_agent notifications.
+    expect(useChatStore.getState().sessions[sessionId]!.chatState).toBe('idle')
+    expect(useChatStore.getState().sessions[sessionId]!.backgroundAgentTasks ?? {}).toEqual({})
+    useTeamPlanStore.setState({ bySession: { other: { ...entry, plan: { ...plan, sessionId: 'other' } } } })
+    render(<ChatInput compact />)
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
+
+    act(() => { useTeamPlanStore.setState({ bySession: { [sessionId]: entry } }) })
+    expect(screen.getByRole('button', { name: 'Run' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }))
+    expect(mocks.wsSend).toHaveBeenCalledWith(sessionId, { type: 'stop_generation' })
+
+    act(() => { useTeamPlanStore.setState({ bySession: { [sessionId]: { ...entry, plan: { ...plan, state: 'interrupted' } } } }) })
+    expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
   })
 
   it.each(['local_bash', 'dream'])('does not turn Run into Stop for a running %s task', (taskType) => {

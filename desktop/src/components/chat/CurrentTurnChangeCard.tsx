@@ -13,7 +13,7 @@ import { shouldOfferStaticHtmlPreview } from '../../lib/htmlPreviewPolicy'
 import { getServerBaseUrl } from '../../lib/desktopRuntime'
 import { useOpenTargetStore } from '../../stores/openTargetStore'
 import { workspaceOpen } from '../../lib/workspace/openTarget'
-import { isWorkspacePreviewableFile } from '../../lib/fileCapabilities'
+import { isWorkspaceDocumentFile, isWorkspacePreviewableFile } from '../../lib/fileCapabilities'
 import { openLocalFileWithSystem, reportOpenFailure } from '../../lib/systemFileOpen'
 
 type CurrentTurnChangeCardProps = {
@@ -91,6 +91,12 @@ export function CurrentTurnChangeCard({
         workspaceOpen.browser(sessionId, localFileUrl(getServerBaseUrl(), fileEntry.apiPath), { origin })
         return
       }
+      workspaceOpen.file(sessionId, fileEntry.displayPath, { origin })
+      return
+    }
+    // A document has no line diff: the turn's recorded change for it is empty, so
+    // the review view would open onto nothing. What was asked for is the document.
+    if (isWorkspaceDocumentFile(fileEntry.displayPath)) {
       workspaceOpen.file(sessionId, fileEntry.displayPath, { origin })
       return
     }

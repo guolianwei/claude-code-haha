@@ -11,6 +11,7 @@ import { recoverBoundedSessionHistory, type SessionHistoryRecovery } from './ses
  * 确保 Desktop App 与 CLI 的数据完全互通。
  */
 
+import { streamSessionMetadata } from './sessionMetadataReader.js'
 import { HISTORY_SEMANTIC_RECORD_BYTES, HISTORY_PAGE_BYTES, displayPreview, readBoundedHistoryPage, streamBoundedHistory, withHistoryReadBudget, type HistoryPageInfo } from './boundedSessionHistory.js'
 import { constants, createReadStream, createWriteStream, type Stats } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -59,6 +60,7 @@ import { getSettings_DEPRECATED } from '../../utils/settings/settings.js'
 import {
   extractGoalCreationTitle,
   extractTranscriptUserTitle,
+  resolveSessionEffortLevel,
 } from './localIndex/transcriptReducer.js'
 import type {
   PersistedWorktreeSession,
@@ -691,8 +693,8 @@ export class SessionService {
 
   private readonly subagentLookupCache = new Map<string, { version: string; transcript: SubagentTranscript }>()
   private readonly historyRecoveryCache = new Map<string, SessionHistoryRecovery>()
-  private readonly metadataProjectionCache = new Map<string, { signature: string; summary: SessionListSummary; launchInfo: SessionLaunchInfo; customTitle: string | null; complete: boolean }>()
-  private readonly metadataProjectionRequests = new Map<string, Promise<{ summary: SessionListSummary; launchInfo: SessionLaunchInfo; customTitle: string | null; complete: boolean }>>()
+  private readonly metadataProjectionCache = new Map<string, { signature: string; summary: SessionListSummary; launchInfo: SessionLaunchInfo; customTitle: string | null }>()
+  private readonly metadataProjectionRequests = new Map<string, Promise<{ summary: SessionListSummary; launchInfo: SessionLaunchInfo; customTitle: string | null }>>()
 
   private readonly sessionHistoryRequests = new Map<string, Promise<{
     messages: MessageEntry[]
@@ -1014,11 +1016,7 @@ export class SessionService {
     if (metadata.runtimeModelId && launchInfo.runtimeModelId !== metadata.runtimeModelId) {
       return false
     }
-    if (
-      metadata.effortLevel &&
-      VALID_SESSION_EFFORT_LEVELS.has(metadata.effortLevel) &&
-      launchInfo.effortLevel !== metadata.effortLevel
-    ) {
+    if (launchInfo.effortLevel !== resolveSessionEffortLevel(metadata, launchInfo.effortLevel)) {
       return false
     }
     return true
@@ -1250,7 +1248,6 @@ export class SessionService {
     summary: SessionListSummary
     launchInfo: SessionLaunchInfo
     customTitle: string | null
-    complete: boolean
   }> {
     const stat = await fs.stat(filePath, { bigint: true })
     const signature = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}`
@@ -1294,7 +1291,7 @@ export class SessionService {
           state.permissionMode = this.resolvePermissionModeFromEntries([entry]) ?? state.permissionMode
           if (record.runtimeProviderId === null || typeof record.runtimeProviderId === 'string') state.runtimeProviderId = record.runtimeProviderId as string | null
           if (typeof record.runtimeModelId === 'string') state.runtimeModelId = record.runtimeModelId
-          if (typeof record.effortLevel === 'string' && VALID_SESSION_EFFORT_LEVELS.has(record.effortLevel)) state.effortLevel = record.effortLevel
+          state.effortLevel = resolveSessionEffortLevel(record, state.effortLevel)
         }
         state.repository = this.resolveRepositoryFromEntries([entry]) ?? state.repository
         const worktree = this.resolveWorktreeSessionFromEntries([entry])
@@ -1310,10 +1307,10 @@ export class SessionService {
         // a handful of maliciously large scalar values or repository fields.
         if (Buffer.byteLength(JSON.stringify(state)) > 128 * 1024) throw new ApiError(413, 'Session metadata exceeds its resource budget', 'SESSION_METADATA_TOO_LARGE')
       }
-      const scan = await streamBoundedHistory(filePath, (entry, completeLine) => {
+      const scan = await streamSessionMetadata(filePath, (entry, completeLine) => {
         apply(launch, entry as RawEntry)
         if (completeLine) apply(summary, entry as RawEntry)
-      }, undefined, { maxRecordBytes: HISTORY_SEMANTIC_RECORD_BYTES })
+      })
       const shared = (state: typeof summary) => ({
         ...(state.permissionMode ? { permissionMode: state.permissionMode } : {}),
         ...(state.runtimeProviderId !== undefined ? { runtimeProviderId: state.runtimeProviderId } : {}),
@@ -1340,7 +1337,6 @@ export class SessionService {
           ...shared(launch),
         },
         customTitle: launch.nonemptyCustomTitle,
-        complete: scan.oversizedRecords === 0,
       }
       this.metadataProjectionCache.delete(key)
       this.metadataProjectionCache.set(key, { signature: scan.sourceVersion, ...result })
@@ -1982,17 +1978,6 @@ export class SessionService {
     return (
       textBlocks.length > 0 &&
       textBlocks.every((text) => text === NO_RESPONSE_REQUESTED_TEXT)
-    )
-  }
-
-  private isToolResultContent(content: unknown): boolean {
-    return (
-      Array.isArray(content) &&
-      content.some((block) =>
-        block &&
-        typeof block === 'object' &&
-        (block as Record<string, unknown>).type === 'tool_result'
-      )
     )
   }
 
@@ -3156,12 +3141,7 @@ export class SessionService {
         if (typeof record.runtimeModelId === 'string') {
           runtimeModelId = record.runtimeModelId
         }
-        if (
-          typeof record.effortLevel === 'string' &&
-          VALID_SESSION_EFFORT_LEVELS.has(record.effortLevel)
-        ) {
-          effortLevel = record.effortLevel
-        }
+        effortLevel = resolveSessionEffortLevel(record, effortLevel)
       }
 
       const candidateRepository = (entry as Record<string, unknown>)?.repository
@@ -4007,19 +3987,11 @@ export class SessionService {
       offsets: result.entries.map(item => item.byteStart),
       signal,
       includeUnownedSidechains,
-      classify: raw => {
-        const entry = raw as RawEntry
-        const user = entry.message?.role === 'user' && !entry.isMeta
-        return {
-          notification: user && this.isTaskNotificationContent(entry.message?.content),
-          reset: user && !this.isToolResultContent(entry.message?.content),
-          agentToolId: this.extractAgentToolUseId(entry),
-        }
-      },
+      agentToolId: raw => this.extractAgentToolUseId(raw as RawEntry),
     })
     const visibleEntries = result.entries.flatMap(item => {
       const state = context.contexts.get(item.byteStart)!
-      if (state.suppressed && !this.isGoalLocalCommandEntry(item.entry as RawEntry)) return []
+      if (state.hidden && !this.isGoalLocalCommandEntry(item.entry as RawEntry)) return []
       return [{ ...item.entry, ...(state.owner ? { parent_tool_use_id: state.owner } : {}) } as RawEntry]
     })
     return { entries: visibleEntries, contextScanBytes: context.scannedBytes }
@@ -4169,18 +4141,13 @@ export class SessionService {
       const taskNotifications: SessionTaskNotification[] = []
       let bytes = 0
       let incomplete = false
-      let suppressTaskNotificationResponse = false
       const scan = await streamBoundedHistory(filePath, raw => {
         const entry = raw as RawEntry
         const message = raw.message as { role?: string; content?: unknown } | undefined
-        if (!entry.isMeta && message?.role === 'user') {
-          if (this.isTaskNotificationContent(message.content)) suppressTaskNotificationResponse = true
-          else if (!this.isToolResultContent(message.content)) suppressTaskNotificationResponse = false
-        }
         const content = Array.isArray(message?.content) ? message.content.filter((block: any) =>
           block?.type === 'tool_use' ? ids.has(block.id) : block?.type === 'tool_result' && ids.has(block.tool_use_id)) : []
         const notices = this.taskNotificationsFromEntries([entry]).filter(notice => ids.has(notice.toolUseId))
-        const selected = content.length && !suppressTaskNotificationResponse
+        const selected = content.length
           ? displayPreview({ ...entry, message: { ...message, content } }) : undefined
         if (selected?.bodyTruncated) incomplete = true
         const selectedBytes = (selected ? Buffer.byteLength(JSON.stringify(selected)) : 0) +
@@ -4624,7 +4591,6 @@ export class SessionService {
     if (!found) return null
 
     const projection = await this.getMetadataProjection(found.filePath, found.projectDir)
-    if (!projection.complete) throw new ApiError(413, 'Session metadata contains oversized records', 'SESSION_METADATA_INCOMPLETE')
     return projection.launchInfo.workDir
   }
 
@@ -4654,7 +4620,6 @@ export class SessionService {
     if (!found) return memory ? { ...memory, transcriptMessageCount: 0 } : null
 
     const projection = await this.getMetadataProjection(found.filePath, found.projectDir)
-    if (!projection.complete) throw new ApiError(413, 'Session metadata contains oversized records', 'SESSION_METADATA_INCOMPLETE')
     const projected = projection.launchInfo
     return { ...projected, ...memory, transcriptMessageCount: projected.transcriptMessageCount }
   }
@@ -4819,7 +4784,11 @@ export class SessionService {
   ): Promise<void> {
     if (isSideChatId(sessionId)) {
       const side = getSideChat(sessionId)
-      if (side && !side.closed) Object.assign(side.launchInfo, metadata)
+      if (side && !side.closed) {
+        Object.assign(side.launchInfo, metadata, {
+          effortLevel: resolveSessionEffortLevel(metadata, side.launchInfo.effortLevel),
+        })
+      }
       return
     }
     const persist = this.shouldPersistSession()
@@ -4844,8 +4813,7 @@ export class SessionService {
           ? { permissionMode: metadata.permissionMode } : {}),
         ...(metadata.runtimeProviderId !== undefined ? { runtimeProviderId: metadata.runtimeProviderId } : {}),
         ...(metadata.runtimeModelId ? { runtimeModelId: metadata.runtimeModelId } : {}),
-        ...(metadata.effortLevel && VALID_SESSION_EFFORT_LEVELS.has(metadata.effortLevel)
-          ? { effortLevel: metadata.effortLevel } : {}),
+        effortLevel: resolveSessionEffortLevel(metadata, previousInfo.effortLevel),
       })
     }
     if (!persist || !this.shouldPersistSession()) {
@@ -5254,7 +5222,6 @@ export class SessionService {
     const messages: MessageEntry[] = []
     const entriesByUuid = new Map<string, RawEntry>()
     const parentToolUseIdCache = new Map<string, string | undefined>()
-    let suppressTaskNotificationResponse = false
 
     for (const entry of entries) {
       if (typeof entry.uuid === 'string' && entry.uuid.length > 0) {
@@ -5277,23 +5244,9 @@ export class SessionService {
       // message that must render as an ordinary user-position bubble.
       if (entry.isMeta && !parseSessionCollaborationEnvelope(entry.message.content)) continue
 
-      const isTaskNotification =
-        entry.message.role === 'user' &&
-        this.isTaskNotificationContent(entry.message.content)
-      if (isTaskNotification) {
-        suppressTaskNotificationResponse = true
-        continue
-      }
-
-      if (
-        entry.message.role === 'user' &&
-        !this.isToolResultContent(entry.message.content)
-      ) {
-        suppressTaskNotificationResponse = false
-      } else if (suppressTaskNotificationResponse) {
-        continue
-      }
-
+      // The queued <task-notification> turn is system plumbing and is hidden here (the
+      // Activity cards come from its notification data). What the assistant does in
+      // response is ordinary conversation, so it is never dropped with it.
       if (this.shouldHideTranscriptEntry(entry)) continue
 
       // Skip non-transcript entry types

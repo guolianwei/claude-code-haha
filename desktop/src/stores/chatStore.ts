@@ -15,7 +15,9 @@ import { useCLITaskStore } from './cliTaskStore'
 import { useWorkflowStore } from './workflowStore'
 import { useSessionRuntimeStore } from './sessionRuntimeStore'
 import { useProviderStore } from './providerStore'
-import { resolveActiveProviderRuntimeSelection, resolveProviderRuntimeModelId } from '../lib/runtimeSelection'
+import { reconcileRuntimeSelection, resolveActiveProviderRuntimeSelection } from '../lib/runtimeSelection'
+import { useSettingsStore } from './settingsStore'
+import { isModelReasoningEffort } from '../../../src/shared/modelReasoning'
 import { useTabStore } from './tabStore'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import { notifyDesktop } from '../lib/desktopNotifications'
@@ -64,11 +66,15 @@ import { cancelPendingManagedMessages, prepareManagedUserMessage } from '../feat
 
 type ConnectionState = 'disconnected' | 'connecting' | 'connected' | 'reconnecting'
 
-function reconcileProviderRuntimeSelection(selection: RuntimeSelection): RuntimeSelection {
-  const provider = useProviderStore.getState().providers.find((entry) => entry.id === selection.providerId)
-  if (!provider) return selection
-  const modelId = resolveProviderRuntimeModelId(provider, selection.modelId)
-  return modelId === selection.modelId ? selection : { ...selection, modelId }
+function reconcileProviderRuntimeSelection(sessionId: string, selection: RuntimeSelection): RuntimeSelection {
+  const providers = useProviderStore.getState()
+  const settings = useSettingsStore.getState()
+  return reconcileRuntimeSelection(selection, {
+    ...providers,
+    hasLoadedProviders: providers.hasLoadedProviders && !isSideChatSession(sessionId),
+    currentModelId: settings.currentModel?.id,
+    defaultEffortLevel: settings.effortLevel,
+  })
 }
 type ToolCall = Extract<UIMessage, { type: 'tool_use' }>
 type CompactSummaryMessage = Extract<UIMessage, { type: 'compact_summary' }>
@@ -205,7 +211,6 @@ export type PerSessionState = {
   historyMutationEpoch?: number
   /** Changes when a directed child stream starts or settles. */
   agentStreamRevision?: number
-  suppressNextTaskNotificationResponse?: boolean
   replaceHistoryOnCompletion?: boolean
   activeGoal?: ActiveGoalState | null
   activeGoalRevision?: number
@@ -259,7 +264,6 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   historyBootstrapDisabled: false,
   historyMutationEpoch: 0,
   agentStreamRevision: 0,
-  suppressNextTaskNotificationResponse: false,
   replaceHistoryOnCompletion: false,
   activeGoal: null,
   activeGoalRevision: 0,
@@ -1340,15 +1344,6 @@ function isCancellableSubagentTask(task: BackgroundAgentTask): boolean {
   return task.status === 'running' && (
     task.taskType === 'local_agent' || task.taskType === 'remote_agent'
   )
-}
-
-function shouldSuppressTaskNotificationResponse(session: PerSessionState): boolean {
-  if (session.chatState !== 'idle') return false
-  const lastMessage = session.messages[session.messages.length - 1]
-  const hasVisibleActiveOutput =
-    session.streamingText.trim().length > 0 ||
-    Boolean(session.activeToolUseId)
-  return !hasVisibleActiveOutput && lastMessage?.type !== 'user_text'
 }
 
 function mergeRestoredTerminalGoalEvents(
@@ -3354,7 +3349,6 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             isPreparingTurn: false,
             historyMutationEpoch: (session.historyMutationEpoch ?? 0) + 1,
             elapsedSeconds: 0,
-            suppressNextTaskNotificationResponse: false,
             replaceHistoryOnCompletion: false,
             streamingText: '',
             streamingResponseChars: 0,
@@ -3431,14 +3425,18 @@ export const useChatStore = create<ChatStore>((setState, get) => {
 
     const selection = useSessionRuntimeStore.getState().selections[sessionId]
     if (selection) {
-      const reconciled = reconcileProviderRuntimeSelection(selection)
+      const reconciled = reconcileProviderRuntimeSelection(sessionId, selection)
       if (reconciled !== selection) get().setSessionRuntime(sessionId, selection)
     } else {
       const providers = useProviderStore.getState()
-      const defaultSelection = resolveActiveProviderRuntimeSelection(
-        providers.activeId, null, providers.providers, undefined,
+      const settings = useSettingsStore.getState()
+      const configuredDefault = resolveActiveProviderRuntimeSelection(
+        providers.activeId, settings.activeProviderName, providers.providers, settings.currentModel?.id,
       )
-      if (defaultSelection) {
+      if (configuredDefault) {
+        const defaultSelection = reconcileProviderRuntimeSelection(sessionId, {
+          ...configuredDefault, effortLevel: settings.effortLevel,
+        })
         useSessionRuntimeStore.getState().setSelection(sessionId, defaultSelection)
         get().setSessionRuntime(sessionId, defaultSelection)
       }
@@ -3543,7 +3541,7 @@ export const useChatStore = create<ChatStore>((setState, get) => {
   },
 
   setSessionRuntime: (sessionId, selection) => {
-    const reconciled = reconcileProviderRuntimeSelection(selection)
+    const reconciled = reconcileProviderRuntimeSelection(sessionId, selection)
     if (reconciled !== selection) {
       useSessionRuntimeStore.getState().setSelection(sessionId, reconciled)
     }
@@ -3611,7 +3609,6 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             pendingComputerUsePermissions: {},
             apiRetry: null,
             streamingFallback: null,
-            suppressNextTaskNotificationResponse: false,
             stoppingBackgroundTaskIds,
             stopAllSubagentsRequested: true,
             elapsedTimer: null,
@@ -4555,7 +4552,6 @@ export const useChatStore = create<ChatStore>((setState, get) => {
           queuedUserMessages: (currentSession.queuedUserMessages ?? [])
             .filter((message) => message.id !== messageId),
           ...(pendingText.trim() ? { streamingText: '' } : {}),
-          suppressNextTaskNotificationResponse: false,
           replaceHistoryOnCompletion: false,
         }
       }),
@@ -4642,7 +4638,6 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       preHydrationSocketGapPending: false,
       apiRetry: null,
       streamingFallback: null,
-      suppressNextTaskNotificationResponse: false,
       replaceHistoryOnCompletion: false,
       queuedUserMessages: [],
     })) }))
@@ -4981,15 +4976,25 @@ export const useChatStore = create<ChatStore>((setState, get) => {
 
       case 'runtime_config_applied': {
         const selected = useSessionRuntimeStore.getState().selections[sessionId]
-        const matchesCurrentSelection = Boolean(selected) &&
-          (selected?.providerId ?? null) === msg.providerId &&
-          selected?.modelId === msg.modelId &&
-          selected?.effortLevel === msg.effortLevel
-        if (matchesCurrentSelection || !selected) recordManagedRuntimeRevision(sessionId, msg.runtimeRevision, true)
-        if (matchesCurrentSelection) {
+        const matchesSelection = (runtime: { providerId: string | null; modelId: string; effortLevel?: string }) =>
+          Boolean(selected) && selected?.providerId === runtime.providerId &&
+          selected?.modelId === runtime.modelId && selected?.effortLevel === runtime.effortLevel
+        const matchesCurrentSelection = matchesSelection(msg)
+        const correctsCurrentSelection = msg.requestedConfig && matchesSelection(msg.requestedConfig)
+        if (matchesCurrentSelection || correctsCurrentSelection || !selected) {
+          recordManagedRuntimeRevision(sessionId, msg.runtimeRevision, true)
+        }
+        if (matchesCurrentSelection || correctsCurrentSelection) {
+          if (correctsCurrentSelection && !matchesCurrentSelection) {
+            useSessionRuntimeStore.getState().setSelection(sessionId, {
+              providerId: msg.providerId, modelId: msg.modelId,
+              ...(msg.effortLevel && isModelReasoningEffort(msg.effortLevel) ? { effortLevel: msg.effortLevel } : {}),
+            })
+          }
           useSessionRuntimeStore.getState().settleSelection(sessionId)
           update((session) => ({
             runtimeConfigReadyCount: (session.runtimeConfigReadyCount ?? 0) + 1,
+            messages: session.messages.filter((message) => message.type !== 'error' || message.code !== 'RUNTIME_CONFIG_INVALID'),
           }))
         }
         break
@@ -5011,18 +5016,6 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       case 'content_start': {
         const session = get().sessions[sessionId]
         if (!session) break
-        if (session.suppressNextTaskNotificationResponse && msg.blockType === 'text') {
-          consumePendingDelta(sessionId)
-          update(() => ({
-            streamingText: '',
-            activeThinkingId: null,
-            statusVerb: '',
-          }))
-          break
-        }
-        if (session.suppressNextTaskNotificationResponse) {
-          update(() => ({ suppressNextTaskNotificationResponse: false }))
-        }
         // The server keeps a stopped-turn fence until it attributes a replay
         // (or a pure local command's first output) to the replacement turn.
         // Mirror that boundary instead of clearing the SubAgent stop latch on
@@ -5164,10 +5157,6 @@ export const useChatStore = create<ChatStore>((setState, get) => {
       }
 
       case 'content_delta':
-        if (get().sessions[sessionId]?.suppressNextTaskNotificationResponse) {
-          consumePendingDelta(sessionId)
-          break
-        }
         let receivedLiveDelta = false
         if (msg.text !== undefined) {
           if (!get().sessions[sessionId]) break
@@ -5228,15 +5217,6 @@ export const useChatStore = create<ChatStore>((setState, get) => {
         break
 
       case 'thinking': {
-        if (get().sessions[sessionId]?.suppressNextTaskNotificationResponse) {
-          consumePendingDelta(sessionId)
-          update(() => ({
-            streamingText: '',
-            activeThinkingId: null,
-            statusVerb: '',
-          }))
-          break
-        }
         // 重放/空块都不该冒出一个新的「已思考」气泡，也不该把会话拖回 thinking 态
         // 或者启动计时器 —— 那正是"打开一个早就结束的会话，它自己开始输出"的观感。
         let skippedThinkingBlock = false
@@ -5565,39 +5545,6 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             void cliTaskStore.refreshTasks(sessionId)
           }
         }
-        if (session.suppressNextTaskNotificationResponse) {
-          consumePendingDelta(sessionId)
-          clearPendingToolInputDelta(sessionId)
-          if (session.elapsedTimer) clearInterval(session.elapsedTimer)
-          const hasRunningBackgroundAgents = hasRunningBackgroundTasks(session.backgroundAgentTasks)
-          update((current) => ({
-            tokenUsage: msg.usage,
-            chatState: 'idle',
-            activeThinkingId: null,
-            pendingPermission: null,
-            pendingPermissions: {},
-            pendingComputerUsePermission: null,
-            pendingComputerUsePermissions: {},
-            elapsedTimer: null,
-            apiRetry: null,
-            streamingFallback: null,
-            streamingText: '',
-            streamingToolInput: '',
-            suppressNextTaskNotificationResponse: false,
-            replaceHistoryOnCompletion: false,
-            historyMutationEpoch: (current.historyMutationEpoch ?? 0) + 1,
-          }))
-          useTabStore.getState().updateTabStatus(sessionId, hasRunningBackgroundAgents ? 'running' : 'idle')
-          reconcileCompletedTranscriptHistory(
-            get,
-            sessionId,
-            session.replaceHistoryOnCompletion === true,
-          )
-          for (const queuedMessage of get().sessions[sessionId]?.queuedUserMessages ?? []) {
-            get().sendQueuedUserMessage(sessionId, queuedMessage.id)
-          }
-          break
-        }
         const completedAt = Date.now()
         const wasAgentRunning = session.chatState !== 'idle'
         const text = `${session.streamingText}${consumePendingDelta(sessionId)}`
@@ -5675,7 +5622,6 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             messages: appendReplayedUserMessage(baseMessages, msg.content, Date.now(), msg.sessionReferences, msg.collaboration),
             ...(pendingText.trim() ? { streamingText: '' } : {}),
             activeThinkingId: null,
-            suppressNextTaskNotificationResponse: false,
             replaceHistoryOnCompletion: false,
             stopAllSubagentsRequested: false,
             historyMutationEpoch: (session.historyMutationEpoch ?? 0) + 1,
@@ -5723,7 +5669,6 @@ export const useChatStore = create<ChatStore>((setState, get) => {
             pendingComputerUsePermissions: {},
             apiRetry: null,
             streamingFallback: null,
-            suppressNextTaskNotificationResponse: false,
             historyMutationEpoch: (s.historyMutationEpoch ?? 0) + 1,
           }
         })
@@ -6087,18 +6032,11 @@ export const useChatStore = create<ChatStore>((setState, get) => {
               hasRunningBackgroundAgentsAfterUpdate = hasRunningBackgroundTasks(backgroundAgentTasks)
               const task = backgroundAgentTasks[taskEvent.taskId]
               const accepted = Boolean(task)
-              const suppressNotificationResponse =
-                accepted &&
-                (taskEvent.status === 'completed' ||
-                  taskEvent.status === 'failed' ||
-                  taskEvent.status === 'stopped') &&
-                shouldSuppressTaskNotificationResponse(session)
               const stoppingBackgroundTaskIds = { ...session.stoppingBackgroundTaskIds }
               delete stoppingBackgroundTaskIds[taskEvent.taskId]
               return {
                 ...buildBackgroundTaskSessionUpdate(session, backgroundAgentTasks, task, now),
                 stoppingBackgroundTaskIds,
-                ...(suppressNotificationResponse ? { suppressNextTaskNotificationResponse: true } : {}),
                 agentTaskNotifications: {
                   ...session.agentTaskNotifications,
                   ...(accepted &&
@@ -7885,14 +7823,14 @@ export function mapHistoryMessagesToUiMessages(
 ): UIMessage[] {
   const includeTeammateMessages = options?.includeTeammateMessages === true
   const uiMessages: UIMessage[] = []
-  let suppressTaskNotificationResponse = false
   let pendingGoalCommand: { name: string; args: string } | null = null
 
   for (const msg of messages) {
-    if (msg.type === 'user' && isTaskNotificationContent(msg.content)) {
-      suppressTaskNotificationResponse = true
-      continue
-    }
+    // A task notification is a system-injected prompt: the background task
+    // cards already stand for it. What the assistant does in the turn that
+    // answers it (thinking, text, tool calls) is ordinary transcript content
+    // and stays visible.
+    if (msg.type === 'user' && isTaskNotificationContent(msg.content)) continue
     if (msg.type === 'user') {
       const commandDisplayText = getCommandMetadataDisplayText(msg.content)
       if (commandDisplayText) {
@@ -7903,17 +7841,11 @@ export function mapHistoryMessagesToUiMessages(
           ...(msg.id ? { transcriptMessageId: msg.id } : {}),
           timestamp: new Date(msg.timestamp).getTime(),
         })
-        suppressTaskNotificationResponse = false
         continue
       }
       if (shouldHideCommandMetadataContent(msg.content)) {
         continue
       }
-    }
-    if (msg.type === 'user') {
-      suppressTaskNotificationResponse = false
-    } else if (suppressTaskNotificationResponse) {
-      continue
     }
 
     const timestamp = new Date(msg.timestamp).getTime()

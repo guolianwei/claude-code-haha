@@ -888,10 +888,11 @@ function shouldUseTextOnlyOpenAIChatContent(baseUrl: string, model: string): boo
     return !hasExplicitVisionModelMarker(model)
   }
 
-  // OpenCode Go's Kimi K3 accepts image_url despite lacking "vision" in its
-  // model id. Keep other unverified gateway models on the text-only path.
+  // OpenCode Go's Kimi K3 and Space Bunny Free accept image_url despite lacking
+  // "vision" in their model ids. Keep other unverified gateway models on the
+  // text-only path. Context-window suffixes have already been stripped.
   if (/(^|[./-])opencode\.ai([:/]|$)/i.test(baseUrl)) {
-    return !hasExplicitVisionModelMarker(model) && model.toLowerCase() !== 'kimi-k3'
+    return !hasExplicitVisionModelMarker(model) && !['kimi-k3', 'space-bunny-free'].includes(model.toLowerCase())
   }
 
   // Preserve the existing behavior for generic compatible providers whose

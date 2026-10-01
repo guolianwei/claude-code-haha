@@ -1075,6 +1075,18 @@ describe('TeamService', () => {
     expect(worker.status).toBe('idle')
   })
 
+  it('keeps delivered reports visible after the leader reads its mailbox', async () => {
+    await writeTeamConfig('read-history-team', makeTeamConfig({ name: 'read-history-team' }))
+    const report = { id: 'report-1', from: 'Worker Agent', text: 'Analysis complete', timestamp: '2026-09-27T15:25:36.411Z' }
+    await writeTeamInbox('read-history-team', 'Lead Agent', [{ ...report, read: false }])
+    const before = await service.getWorkbench('read-history-team')
+    await writeTeamInbox('read-history-team', 'Lead Agent', [{ ...report, read: true }])
+    const after = await service.getWorkbench('read-history-team')
+    expect(after.messages).toEqual(before.messages)
+    expect(after.messages).toHaveLength(1)
+    expect(after.messages[0]).toMatchObject({ from: 'Worker Agent', text: 'Analysis complete', recipients: ['Lead Agent'] })
+  })
+
   it('joins team, task DAG, and mailbox history without collapsing legitimate repeats', async () => {
     await writeTeamConfig('workbench-team', makeTeamConfig({
       name: 'workbench-team',

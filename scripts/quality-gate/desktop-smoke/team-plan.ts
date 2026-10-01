@@ -106,8 +106,9 @@ export async function runDesktopUiTeamPlanSmoke(options: {
   if (boots.length !== 2 || !boots.some(event => event.model === TEAM_SMOKE_MODEL && event.baseUrl === 'http://127.0.0.1:2')) throw new Error('Workers did not preserve their approved provider/model routing')
   writeFileSync(join(artifactDir, 'team-review-result.json'), JSON.stringify({ plan: await getPlan(), workerEvents: events }, null, 2))
   await browserStep(['screenshot', join(artifactDir, 'team-review-running.png')], { allowFailure: true })
-  await browserStep(['wait', '[data-testid="team-plan-stop"]'])
-  await browserStep(['click', '[data-testid="team-plan-stop"]'])
+  await browserStep(['wait', '--fn', '!document.querySelector("[data-testid=team-plan-open]") && !document.querySelector("[data-testid=team-plan-approve]")'])
+  await browserStep(['wait', 'button[aria-label="Stop"]'])
+  await browserStep(['click', 'button[aria-label="Stop"]'])
   await until(async () => (await getPlan()).state === 'interrupted', 'visible Stop to interrupt the running team')
   await until(async () => {
     const team = JSON.parse(readFileSync(join(configDir, 'teams', TEAM_SMOKE_TEAM, 'config.json'), 'utf8'))

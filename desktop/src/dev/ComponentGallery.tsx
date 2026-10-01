@@ -25,7 +25,10 @@ import { Spinner } from '@/components/ui/Spinner'
 import { Switch } from '@/components/ui/Switch'
 import { TextArea } from '@/components/ui/TextArea'
 import { Tooltip } from '@/components/ui/Tooltip'
+import { ZoomableImage, type ImageZoom } from '@/components/ui/ZoomableImage'
+import { ZoomControls, type ZoomControlsLabels } from '@/components/ui/ZoomControls'
 import { BrandSeal } from '@/components/composite/BrandSeal'
+import { ZOOM_MAX, ZOOM_MIN, stepZoom, zoomPercent } from '@/lib/zoomPan'
 import { useTeamStore } from '@/stores/teamStore'
 import { THEME_MODES } from '@/types/settings'
 import type {
@@ -321,6 +324,42 @@ function createAgentTeamsGallerySnapshots(now = Date.now()): TeamWorkbenchSnapsh
       ],
     },
   ]
+}
+
+const ZOOM_LABELS: ZoomControlsLabels = {
+  group: 'Zoom controls',
+  zoomIn: 'Zoom in',
+  zoomOut: 'Zoom out',
+  fit: 'Fit to window',
+}
+
+/** A grid, so that zooming and panning are visible, with named colours to stay clear of hex literals. */
+const ZOOM_SAMPLE = `data:image/svg+xml;utf8,${encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000">'
+  + '<defs><pattern id="g" width="100" height="100" patternUnits="userSpaceOnUse">'
+  + '<path d="M100 0H0V100" fill="none" stroke="gray" stroke-width="2"/></pattern></defs>'
+  + '<rect width="1600" height="1000" fill="lightsteelblue"/><rect width="1600" height="1000" fill="url(#g)"/>'
+  + '<text x="800" y="530" font-size="120" text-anchor="middle" fill="darkslategray">1600 x 1000</text></svg>',
+)}`
+
+/** The cluster on its own, with a real ladder behind it so the disabled ends can be seen. */
+function ZoomControlsDemo({ surface, flat }: { surface?: 'default' | 'media'; flat?: boolean }) {
+  const [zoom, setZoom] = useState<ImageZoom>('fit')
+  const scale = zoom === 'fit' ? 1 : zoom
+  return (
+    <ZoomControls
+      percent={zoomPercent(scale)}
+      fitActive={zoom === 'fit'}
+      canZoomIn={scale < ZOOM_MAX}
+      canZoomOut={scale > ZOOM_MIN}
+      onZoomIn={() => setZoom(stepZoom(scale, 1))}
+      onZoomOut={() => setZoom(stepZoom(scale, -1))}
+      onFit={() => setZoom('fit')}
+      labels={ZOOM_LABELS}
+      surface={surface}
+      flat={flat}
+    />
+  )
 }
 
 function Section({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
@@ -654,6 +693,27 @@ export function ComponentGallery() {
           <Card shadow="card">shadow=card</Card>
           <Card shadow="composer">shadow=composer</Card>
           <Card interactive lift>lift (hover raises 2px)</Card>
+        </div>
+      </Section>
+
+      <Section
+        title="ZoomControls / ZoomableImage"
+        note="The zoom cluster every viewer shares. In the images: Ctrl/⌘+wheel and pinch zoom about the pointer, drag pans, double-click toggles fit and 100%, and + - 0 1 work from the keyboard. Check the dark lightbox surface as well as the panel."
+      >
+        <div className="flex flex-wrap items-center gap-4">
+          <ZoomControlsDemo />
+          <ZoomControlsDemo flat />
+          <div className="flex items-center rounded-[var(--radius-lg)] bg-[var(--color-media-bg)] p-3">
+            <ZoomControlsDemo surface="media" />
+          </div>
+        </div>
+        <div className="grid h-80 grid-cols-1 gap-3 md:grid-cols-2">
+          <div className="flex min-h-0 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)]">
+            <ZoomableImage src={ZOOM_SAMPLE} alt="Sample grid" labels={ZOOM_LABELS} />
+          </div>
+          <div className="flex min-h-0 overflow-hidden rounded-[var(--radius-lg)] bg-[var(--color-media-bg)]">
+            <ZoomableImage src={ZOOM_SAMPLE} alt="Sample grid on the lightbox" labels={ZOOM_LABELS} surface="media" />
+          </div>
         </div>
       </Section>
 

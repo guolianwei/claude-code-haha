@@ -102,6 +102,14 @@ describe('AgentTeamsMemberInspector', () => {
     useSettingsStore.setState({ locale: 'en' })
   })
 
+  it('points members with no team messages to their execution progress', () => {
+    const onOpenExecution = vi.fn()
+    renderInspector({ onOpenExecution })
+    expect(screen.getByText(/Approved tasks are delivered directly; use the execution button below/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /execution/i }))
+    expect(onOpenExecution).toHaveBeenCalledOnce()
+  })
+
   it('derives the first start and elapsed duration from task state transitions', () => {
     const snapshots = [
       snapshot('2026-08-08T07:00:00.000Z', 'pending'),

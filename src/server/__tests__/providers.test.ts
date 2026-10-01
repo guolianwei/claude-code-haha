@@ -2357,10 +2357,17 @@ describe('ProviderService', () => {
       expect(JSON.stringify(body)).not.toContain('Image omitted:')
     })
 
-    test.each(['user', 'tool'] as const)('forwards Kimi K3 images through OpenCode Go from %s content (#1368)', async (contentSource) => {
+    test.each([
+      { model: 'kimi-k3', contentSource: 'user' },
+      { model: 'kimi-k3', contentSource: 'tool' },
+      { model: 'space-bunny-free', contentSource: 'user' },
+      { model: 'space-bunny-free', contentSource: 'tool' },
+      { model: 'space-bunny-free[1m]', contentSource: 'user' },
+      { model: 'space-bunny-free[1m]', contentSource: 'tool' },
+    ] as const)('forwards OpenCode Go images for $model from $contentSource content', async ({ model, contentSource }) => {
       const body = await captureOpenAIChatRequest({
         baseUrl: 'https://opencode.ai/zen/go/v1',
-        model: 'kimi-k3',
+        model,
         contentSource,
         content: [
           { type: 'text', text: 'Describe these pictures.' },
@@ -2372,6 +2379,7 @@ describe('ProviderService', () => {
       const images = ['one', 'two'].map(suffix => ({
         type: 'image_url', image_url: { url: `data:image/png;base64,k3-picture-${suffix}` },
       }))
+      expect(body.model).toBe(model.replace(/\[1m\]$/, ''))
       expect(body.messages).toEqual(contentSource === 'user'
         ? [{ role: 'user', content: [{ type: 'text', text: 'Describe these pictures.' }, ...images] }]
         : [

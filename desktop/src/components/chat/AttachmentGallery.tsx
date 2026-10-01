@@ -75,7 +75,7 @@ export function AttachmentGallery({ attachments, variant = 'message', onRemove }
         if (attachment.type !== 'image') return []
         const src = attachmentImageSource(attachment)
         if (!src || unloadableImageSources.has(src)) return []
-        return [{ src, name: attachment.name }]
+        return [{ src, name: attachment.name, ...(attachment.path ? { path: attachment.path } : {}) }]
       }),
     [attachments, unloadableImageSources],
   )
