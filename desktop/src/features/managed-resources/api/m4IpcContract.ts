@@ -112,6 +112,14 @@ export function isM4FileName(value: unknown): value is string {
   return true
 }
 
+/** A single Linux remote entry name used for SFTP rename operations. */
+export function isM4RemoteEntryName(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  if (value.length === 0 || value.length > M4_FILENAME_MAX_CHARS) return false
+  if (value === '.' || value === '..') return false
+  return !/[\/\u0000-\u001f\u007f]/.test(value)
+}
+
 export function isM4BaseRevision(value: unknown): value is string {
   return typeof value === 'string'
     && value.length >= 1
@@ -136,6 +144,7 @@ export const M4_PAYLOAD_FIELDS = {
   revokeToken: ['ownerId', 'token'],
   sftpList: ['ownerId', 'connectionId', 'generation', 'absolutePath'],
   sftpStat: ['ownerId', 'connectionId', 'generation', 'absolutePath'],
+  sftpRename: ['ownerId', 'connectionId', 'generation', 'absolutePath', 'newName'],
   transferStartDownload: ['ownerId', 'jobId', 'connectionId', 'generation', 'remotePath', 'localToken'],
   transferStartUpload: ['ownerId', 'jobId', 'connectionId', 'generation', 'remotePath', 'localToken'],
   folderTransfer: ['ownerId', 'jobId', 'connectionId', 'generation', 'remotePath'],

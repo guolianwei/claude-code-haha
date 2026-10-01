@@ -1575,7 +1575,7 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
             `-mx-3` has to cancel the panel's `p-3` exactly, and the panel is
             padded by the same chrome rule.
           */}
-          <div data-testid="chat-input-toolbar" className={`flex min-w-0 items-center justify-between gap-2 ${
+          <div data-testid="chat-input-toolbar" className={`flex min-w-0 flex-wrap items-center justify-between gap-2 ${
             isHeroComposer
               ? 'pt-3'
               : useCompactChrome
@@ -1584,7 +1584,7 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
           }`}>
             <div
               data-testid="chat-input-toolbar-leading"
-              className={`flex min-w-0 shrink-0 items-center ${showLocationInToolbar ? 'max-w-[55%]' : ''} ${isMobileComposer ? 'gap-1' : 'gap-2'}`}
+              className={`flex min-w-0 shrink-0 items-center ${showLocationInToolbar ? 'max-w-[45%]' : ''} ${isMobileComposer ? 'gap-1' : 'gap-2'}`}
             >
               {!isMemberSession && (
                 <>
@@ -1671,7 +1671,7 @@ export function ChatInput({ variant = 'default', compact = false, sessionId, vis
 
             <div
               data-testid="chat-input-toolbar-trailing"
-              className={`flex min-w-0 flex-1 items-center justify-end ${isMobileComposer ? 'gap-1' : 'gap-2'}`}
+              className={`flex min-w-0 max-w-full flex-[1_0_260px] items-center justify-end ${isMobileComposer ? 'gap-1' : 'gap-2'}`}
             >
               {!isMemberSession && activeTabId && (
                 <ContextUsageIndicator

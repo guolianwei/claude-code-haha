@@ -370,6 +370,7 @@ function ripGrepRaw(
     fullArgs,
     {
       maxBuffer: MAX_BUFFER_SIZE,
+      windowsHide: true,
       signal: abortSignal,
       timeout,
       killSignal: process.platform === 'win32' ? undefined : 'SIGKILL',
@@ -734,6 +735,7 @@ const testRipgrepOnFirstUse = memoize(async (): Promise<void> => {
       // Only Bun embeds ripgrep.
       // eslint-disable-next-line custom-rules/require-bun-typeof-guard
       const proc = Bun.spawn([config.command, '--version'], {
+        windowsHide: true,
         argv0: config.argv0,
         stderr: 'ignore',
         stdout: 'pipe',

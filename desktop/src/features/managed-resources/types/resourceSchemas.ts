@@ -12,6 +12,7 @@
  */
 
 import { z } from 'zod'
+import { MAX_SSH_ACCOUNTS } from './hostSshAccounts.js'
 import {
   AccessUrlSchema,
   AddressSchema,
@@ -89,6 +90,12 @@ export const HostAuthSchema = z
   })
   .passthrough()
 
+export const HostSshAccountSchema = z.object({
+  id: IdSchema,
+  username: UsernameSchema,
+  auth: HostAuthSchema,
+}).passthrough()
+
 export const HostApplicationAccountSchema = z
   .object({
     id: IdSchema,
@@ -123,6 +130,9 @@ export const HostSchema = z
     port: PortSchema,
     username: UsernameSchema,
     auth: HostAuthSchema,
+    // Forward-only additive migration: retain the old default login and all
+    // unknown metadata; persist the normalized array on the next atomic save.
+    sshAccounts: UniqueIdObjectArraySchema(HostSshAccountSchema, MAX_SSH_ACCOUNTS - 1).default([]),
     tagIds: UniqueIdArraySchema.max(50),
     initialDirectory: z
       .string()
@@ -132,6 +142,15 @@ export const HostSchema = z
     notes: z.string().max(16 * 1024),
   })
   .passthrough()
+  .superRefine((host, ctx) => {
+    const usernames = new Set([host.username])
+    for (const [index, account] of host.sshAccounts.entries()) {
+      if (account.id === host.id || usernames.has(account.username)) {
+        ctx.addIssue({ code: 'custom', path: ['sshAccounts', index], message: 'SSH account ids and usernames must be unique within the host' })
+      }
+      usernames.add(account.username)
+    }
+  })
 
 // ---------- Concept ----------
 

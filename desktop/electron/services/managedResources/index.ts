@@ -1,5 +1,6 @@
 import path from 'node:path'
 import type { BrowserWindow, IpcMain } from 'electron'
+import { appendHostDiagnostic } from '../sidecarManager.js'
 import { registerManagedResourcesIpc, type ManagedResourcesServices, type ManagedResourcesDialogService } from './registerIpc.js'
 import { createResourceDocumentStore } from './repositories/resourceDocumentStore.js'
 import { createResourceLibraryService } from './repositories/resourceLibraryService.js'
@@ -24,6 +25,8 @@ export type CreateManagedResourcesModuleOptions = {
   getMainWindow: () => BrowserWindow | null
   activeConfigDir?: string
   userDataDir?: string
+  /** Optional explicit destination for isolated test/diagnostic environments. */
+  sshDiagnosticsFile?: string
   ipcMain?: IpcMain
   safeStorage?: SafeStorageAdapter
   dialogService?: ManagedResourcesDialogService
@@ -78,6 +81,10 @@ export function createManagedResourcesModule(
   const temporaryCredentials = createTemporaryCredentialStore()
   const knownHosts = createKnownHostsService(store)
   const sshService = createSshSessionService({
+    // Separate from chat/adapter chatter so its bounded tail retains SSH evidence.
+    diagnostic: line => appendHostDiagnostic(
+      options.sshDiagnosticsFile ?? path.join(activeConfigDir, 'cc-haha', 'diagnostics', 'ssh-connections.log'), line,
+    ),
     store,
     knownHosts,
     vault,
@@ -88,10 +95,10 @@ export function createManagedResourcesModule(
       const resolved = temporaryCredentials.resolveLatestForOwnerHost(input)
       if (resolved.status !== 'resolved') return null
       const payload = resolved.payload
-      if ('password' in payload && typeof payload.password === 'string') {
+      if (payload.kind === 'ssh-password' && 'password' in payload) {
         return { password: payload.password }
       }
-      if ('privateKeyPem' in payload && typeof payload.privateKeyPem === 'string') {
+      if (payload.kind === 'ssh-private-key' && 'privateKeyPem' in payload) {
         return {
           privateKeyPem: payload.privateKeyPem,
           passphrase: payload.passphrase,

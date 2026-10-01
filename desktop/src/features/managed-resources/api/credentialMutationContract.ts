@@ -10,4 +10,6 @@ export const HostCredentialWriteSchema = z.object({
 }).strict()
 
 export type HostCredentialWrite = z.infer<typeof HostCredentialWriteSchema>
+/** Write-only side channel; never attach this array to persisted Host metadata. */
+export type SshAccountCredentialWrite = { accountId: string; credential: HostCredentialWrite }
 export type AccountPasswordWrite = { password?: string }

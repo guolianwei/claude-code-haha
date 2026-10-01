@@ -1,6 +1,8 @@
 import { Buffer } from 'node:buffer'
 import crypto from 'node:crypto'
 import { Client as SshClient } from 'ssh2'
+import { requireHostSshAccount } from '../../../src/features/managed-resources/types/hostSshAccounts.js'
+import { enablePasswordKeyboardInteractive, sshAuthenticationErrorCode } from './sshPasswordAuthentication.js'
 import type {
   SshConnectionStatus,
   SshHostKeyChallenge,
@@ -13,10 +15,12 @@ import type { CredentialVault } from './vault/credentialVault.js'
 export type { SshConnectionStatus, SshHostKeyChallenge, HostManagementEvent }
 
 export type SshSessionOptions = {
+  /** Receives bounded metadata only, never secrets, terminal output, or raw errors. */
+  diagnostic?: (line: string) => void
   store: ResourceDocumentStore
   knownHosts: KnownHostsService
   vault?: CredentialVault
-  resolveTemporaryCredential?: (input: { ownerId: string; hostId: string }) => {
+  resolveTemporaryCredential?: (input: { ownerId: string; hostId: string; accountId?: string }) => {
     password?: string
     privateKeyPem?: string
     passphrase?: string
@@ -36,6 +40,9 @@ export type SshSession = {
   generation: number
   ownerId: string
   hostId: string
+  accountId: string
+  username: string
+  hostRevision: number
   status: SshConnectionStatus
   cols: number
   rows: number
@@ -58,6 +65,7 @@ export type SshSession = {
 export type SshSessionService = {
   createConnection(input: {
     hostId: string
+    accountId?: string
     expectedRevision?: number
     cols?: number
     rows?: number
@@ -222,8 +230,28 @@ export function createSshSessionService(options: SshSessionOptions): SshSessionS
     session.seq = 0
   }
 
+  function diagnose(session: SshSession, phase: string, details: {
+    endpoint?: string
+    authType?: 'password' | 'privateKey'
+    credentialSource?: 'vault' | 'temporary'
+    errorCode?: string
+  } = {}) {
+    if (!options.diagnostic) return
+    // Explicit projection: do not spread a Host, credential, ssh2 config, error,
+    // banner, or keyboard prompt into diagnostic output.
+    const line = JSON.stringify({
+      timestamp: new Date().toISOString(), phase,
+      connectionId: session.connectionId, generation: session.generation,
+      hostId: session.hostId, accountId: session.accountId, username: session.username,
+      endpoint: details.endpoint, authType: details.authType, credentialSource: details.credentialSource,
+      errorCode: details.errorCode && /^[A-Z][A-Z0-9_]{0,63}$/.test(details.errorCode) ? details.errorCode : details.errorCode ? 'SSH_ERROR' : undefined,
+    })
+    try { options.diagnostic(`[managed-ssh] ${line}`) } catch { /* Diagnostics must not affect authentication. */ }
+  }
+
   function updateStatus(session: SshSession, status: SshConnectionStatus, error?: string, hostKeyChallenge?: SshHostKeyChallenge) {
     session.status = status
+    diagnose(session, status, { errorCode: error })
     emit({
       type: 'connection-state',
       connectionId: session.connectionId,
@@ -354,12 +382,16 @@ export function createSshSessionService(options: SshSessionOptions): SshSessionS
         throw new Error(`REVISION_CONFLICT: expected ${expectedRevision}, actual ${host.revision}`)
       }
 
+      const account = requireHostSshAccount(host, input.accountId)
       const connectionId = crypto.randomUUID()
       const session: SshSession = {
         connectionId,
         generation: 1,
         ownerId,
         hostId,
+        accountId: account.id,
+        username: account.username,
+        hostRevision: host.revision,
         status: 'allocated',
         cols: Math.max(2, Math.min(500, cols)),
         rows: Math.max(1, Math.min(300, rows)),
@@ -373,6 +405,10 @@ export function createSshSessionService(options: SshSessionOptions): SshSessionS
       }
 
       sessions.set(connectionId, session)
+      diagnose(session, 'allocated', {
+        endpoint: knownHosts.canonicalizeEndpoint(host.address, host.port), authType: account.auth.type,
+        credentialSource: account.auth.credentialId ? 'vault' : 'temporary',
+      })
       return { connectionId, generation: 1 }
     },
 
@@ -423,32 +459,43 @@ export function createSshSessionService(options: SshSessionOptions): SshSessionS
         return
       }
 
+      // A disconnect while loading must not resurrect a connection. A saved
+      // edit requires a fresh allocation rather than changing an active identity.
+      if (session.generation !== currentGen || !(['connecting'] as SshConnectionStatus[]).includes(session.status)) return
+      if (host.revision !== session.hostRevision) {
+        updateStatus(session, 'failed', 'REVISION_CONFLICT')
+        return
+      }
+      const account = requireHostSshAccount(host, session.accountId)
       let password: string | undefined
-      let privateKey: string | Buffer | undefined
+      let privateKey: string | undefined
       let passphrase: string | undefined
 
-      const tempCred = resolveTemporaryCredential?.({ ownerId, hostId: host.id })
-      if (tempCred) {
-        if (tempCred.password) password = tempCred.password
-        if (tempCred.privateKeyPem) privateKey = tempCred.privateKeyPem
-        if (tempCred.passphrase) passphrase = tempCred.passphrase
+      // A bound vault credential is authoritative. Never override it with an
+      // older temporary secret or a different account's most recent password.
+      if (account.auth.credentialId) {
+        if (!vault) { updateStatus(session, 'failed', 'VAULT_UNAVAILABLE'); return }
+        const record = loaded.document.credentials.find(c => c.id === account.auth.credentialId)
+        const kind = account.auth.type === 'password' ? 'ssh-password' : 'ssh-private-key'
+        if (!record) { updateStatus(session, 'failed', 'SSH_CREDENTIAL_MISSING'); return }
+        if (record.kind !== kind) { updateStatus(session, 'failed', 'INVALID_CREDENTIAL_PAYLOAD'); return }
+        const decrypted = vault.decrypt(record)
+        if (decrypted.status !== 'decrypted') { updateStatus(session, 'failed', decrypted.code); return }
+        if ('password' in decrypted.payload) password = decrypted.payload.password
+        else { privateKey = decrypted.payload.privateKeyPem; passphrase = decrypted.payload.passphrase }
+      } else {
+        const temporary = resolveTemporaryCredential?.({ ownerId, hostId: host.id, accountId: account.id })
+        if (account.auth.type === 'password') password = temporary?.password
+        else { privateKey = temporary?.privateKeyPem; passphrase = temporary?.passphrase }
+      }
+      if (account.auth.type === 'password' ? !password : !privateKey) {
+        updateStatus(session, 'failed', 'SSH_CREDENTIAL_MISSING')
+        return
       }
 
-      if (!password && !privateKey && host.auth.credentialId && vault) {
-        const credRecord = loaded.document.credentials.find((c) => c.id === host.auth.credentialId)
-        if (credRecord) {
-          const decrypted = vault.decrypt(credRecord)
-          if (decrypted.status === 'decrypted') {
-            if ('password' in decrypted.payload) {
-              password = decrypted.payload.password
-            } else if ('privateKeyPem' in decrypted.payload) {
-              privateKey = decrypted.payload.privateKeyPem
-              passphrase = decrypted.payload.passphrase
-            }
-          }
-        }
-      }
-
+      diagnose(session, 'credentials-ready', {
+        authType: account.auth.type, credentialSource: account.auth.credentialId ? 'vault' : 'temporary',
+      })
       const client = new SshClient()
       session.client = client
 
@@ -465,7 +512,7 @@ export function createSshSessionService(options: SshSessionOptions): SshSessionS
           cleanupSession(session)
           return
         }
-        const errMsg = err?.message || 'SSH_ERROR'
+        const errMsg = sshAuthenticationErrorCode(err)
         updateStatus(session, 'failed', errMsg)
         cleanupSession(session)
       })
@@ -501,10 +548,11 @@ export function createSshSessionService(options: SshSessionOptions): SshSessionS
       })
 
       client.on('ready', () => {
-        if (session.generation !== currentGen || session.status === 'closed' || session.status === 'closing') {
+        if (session.generation !== currentGen || session.client !== client || session.status !== 'authenticating') {
           client.end()
           return
         }
+        diagnose(session, 'authenticated')
 
         client.shell(
           {
@@ -513,8 +561,14 @@ export function createSshSessionService(options: SshSessionOptions): SshSessionS
             rows: session.rows,
           },
           (err, channel) => {
+            // A delayed channel callback must not revive a closed connection or
+            // replace another generation's SSH/SFTP identity.
+            if (session.generation !== currentGen || session.client !== client || session.status !== 'authenticating') {
+              try { channel?.close() } catch {}
+              return
+            }
             if (err) {
-              updateStatus(session, 'failed', err.message)
+              updateStatus(session, 'failed', 'SSH_ERROR')
               cleanupSession(session)
               return
             }
@@ -548,7 +602,7 @@ export function createSshSessionService(options: SshSessionOptions): SshSessionS
       const connectConfig: any = {
         host: host.address,
         port: host.port,
-        username: host.username,
+        username: account.username,
         readyTimeout: effectiveReadyTimeoutMs,
         keepaliveInterval: 15000,
         keepaliveCountMax: 3,
@@ -640,6 +694,13 @@ export function createSshSessionService(options: SshSessionOptions): SshSessionS
 
       if (password) {
         connectConfig.password = password
+        connectConfig.tryKeyboard = true
+        client.on('keyboard-interactive', () => {
+          if (session.generation === currentGen && session.status === 'authenticating') diagnose(session, 'keyboard-interactive')
+        })
+        enablePasswordKeyboardInteractive(client, password,
+          () => session.generation === currentGen && session.status === 'authenticating',
+          code => { updateStatus(session, 'failed', code); cleanupSession(session) })
       }
       if (privateKey) {
         connectConfig.privateKey = privateKey
@@ -649,7 +710,7 @@ export function createSshSessionService(options: SshSessionOptions): SshSessionS
       try {
         client.connect(connectConfig)
       } catch (err: any) {
-        updateStatus(session, 'failed', err.message || 'CONNECT_FAILED')
+        updateStatus(session, 'failed', sshAuthenticationErrorCode(err))
         cleanupSession(session)
       }
     },
@@ -670,6 +731,7 @@ export function createSshSessionService(options: SshSessionOptions): SshSessionS
       }
 
       clearTimeout(challenge.timer)
+      const isCurrentChallenge = () => session.pendingChallenge === challenge && session.status === 'awaiting_host_key'
 
       if (decision === 'trust') {
         try {
@@ -677,12 +739,14 @@ export function createSshSessionService(options: SshSessionOptions): SshSessionS
           // transport failure must see exactly the key the user approved.
           await knownHosts.trustHostKey(challenge.endpoint, challenge.algorithm, challenge.sha256)
         } catch {
+          if (!isCurrentChallenge()) return
           session.pendingChallenge = null
           updateStatus(session, 'failed', 'HOST_KEY_TRUST_FAILED')
           challenge.verifyCallback(false)
           cleanupSession(session)
           return
         }
+        if (!isCurrentChallenge()) return
         session.pendingChallenge = null
         updateStatus(session, 'authenticating')
         challenge.verifyCallback(true)

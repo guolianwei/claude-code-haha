@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import { HostCredentialWriteSchema, type HostCredentialWrite, type AccountPasswordWrite } from './credentialMutationContract.js'
+import { HostCredentialWriteSchema, type HostCredentialWrite, type SshAccountCredentialWrite, type AccountPasswordWrite } from './credentialMutationContract.js'
 import {
   M4_BASE_REVISION_MAX_CHARS,
   M4_EDIT_TEXT_MAX_BYTES,
@@ -12,6 +12,7 @@ import {
   isM4BaseRevision,
   isM4EditText,
   isM4FileName,
+  isM4RemoteEntryName,
   isM4Generation,
   isM4Uuid,
 } from './m4IpcContract.js'
@@ -33,11 +34,13 @@ export type CreateApplicationInput = Omit<HostApplication, 'id' | 'accounts'> & 
 
 export type CreateHostInput = Omit<Host, 'id' | 'revision' | 'createdAt' | 'updatedAt' | 'applications'> & {
   credential?: HostCredentialWrite
+  sshAccountCredentials?: SshAccountCredentialWrite[]
   applications: CreateApplicationInput[]
 }
 
 export type UpdateHostInput = {
   credential?: HostCredentialWrite
+  sshAccountCredentials?: SshAccountCredentialWrite[]
   id: string
   expectedRevision: number
   changes: Partial<Omit<Host, 'id' | 'revision' | 'createdAt' | 'updatedAt' | 'applications'>>
@@ -228,9 +231,21 @@ export const CreateApplicationInputSchema = z.object({
   notes: z.string().max(16 * 1024),
 }).strict()
 
+const SshAccountInputSchema = z.object({
+  id: IdSchema,
+  username: UsernameSchema,
+  auth: z.object({ type: z.enum(['password', 'privateKey']), credentialId: IdSchema.nullable() }).strict(),
+}).strict()
+const SshAccountCredentialsInputSchema = z.array(z.object({
+  accountId: IdSchema,
+  credential: HostCredentialWriteSchema,
+}).strict()).max(31)
+
 export const SaveHostInputSchema = z.union([
   z.object({
     credential: HostCredentialWriteSchema.optional(),
+    sshAccountCredentials: SshAccountCredentialsInputSchema.optional(),
+    sshAccounts: z.array(SshAccountInputSchema).max(31).optional(),
     mode: z.literal('create').optional(),
     ownerId: OptionalOwnerIdSchema,
     name: NameSchema,
@@ -252,7 +267,9 @@ export const SaveHostInputSchema = z.union([
     id: IdSchema,
     expectedRevision: RevisionSchema,
     credential: HostCredentialWriteSchema.optional(),
+    sshAccountCredentials: SshAccountCredentialsInputSchema.optional(),
     changes: z.object({
+      sshAccounts: z.array(SshAccountInputSchema).max(31).optional(),
       name: NameSchema.optional(),
       address: AddressSchema.optional(),
       port: PortSchema.optional(),
@@ -456,6 +473,7 @@ export const ContextSelectionInputSchema = z.object({
 export const CreateConnectionInputSchema = z.object({
   ownerId: OptionalOwnerIdSchema,
   hostId: IdSchema,
+  accountId: IdSchema.optional(),
   expectedRevision: RevisionSchema.optional(),
   cols: z.number().int().min(2).max(500).optional(),
   rows: z.number().int().min(1).max(300).optional(),
@@ -542,6 +560,12 @@ const M4_FILENAME = z
     message: `must be a single file name of at most ${M4_FILENAME_MAX_CHARS} chars without path separators, drive letters, or Windows-forbidden characters`,
   })
 
+const M4_REMOTE_ENTRY_NAME = z
+  .string()
+  .refine(isM4RemoteEntryName, {
+    message: `must be a single remote entry name of at most ${M4_FILENAME_MAX_CHARS} chars without slash or control characters`,
+  })
+
 const M4_UUID = z.string().refine(isM4Uuid, { message: M4_UUID_MESSAGE })
 const M4_GENERATION = z.number().refine(isM4Generation, { message: 'must be an integer >= 1' })
 
@@ -582,6 +606,14 @@ export const SftpStatInputSchema = z.object({
   connectionId: M4_UUID,
   generation: M4_GENERATION,
   absolutePath: M4_ABSOLUTE_POSIX_PATH(M4_PATH_MAX_CHARS),
+}).strict()
+
+export const SftpRenameInputSchema = z.object({
+  ownerId: OptionalOwnerIdSchema,
+  connectionId: M4_UUID,
+  generation: M4_GENERATION,
+  absolutePath: M4_ABSOLUTE_POSIX_PATH(M4_PATH_MAX_CHARS),
+  newName: M4_REMOTE_ENTRY_NAME,
 }).strict()
 
 export const TransferStartDownloadInputSchema = z.object({
@@ -824,6 +856,7 @@ export type HostManagementHostApi = {
   // SSH Connection & Terminal (M3)
   createConnection(input: {
     hostId: string
+    accountId?: string
     expectedRevision?: number
     cols?: number
     rows?: number
@@ -874,6 +907,12 @@ export type HostManagementHostApi = {
     connectionId: string,
     generation: number,
     absolutePath: string
+  ): Promise<HostManagementResult<ManagedSftpEntry>>
+  sftpRename(
+    connectionId: string,
+    generation: number,
+    absolutePath: string,
+    newName: string
   ): Promise<HostManagementResult<ManagedSftpEntry>>
   transferStartDownload(
     jobId: string,

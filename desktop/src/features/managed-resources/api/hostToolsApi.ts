@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-export const ProcessKindSchema = z.enum(['java', 'mysql', 'redis'])
+export const ProcessKindSchema = z.enum(['java', 'mysql', 'redis', 'nginx', 'keepalived'])
 export type ProcessKind = z.infer<typeof ProcessKindSchema>
 export const ProcessProbeSchema = z.enum(['top', 'ports', 'connections'])
 export type ProcessProbe = z.infer<typeof ProcessProbeSchema>

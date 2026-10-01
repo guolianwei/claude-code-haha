@@ -37,7 +37,10 @@ function execFilePromise(
     execFile(
       cmd,
       args,
-      { encoding: 'utf-8', timeout: MDM_SUBPROCESS_TIMEOUT_MS },
+      // Startup and periodic policy checks are background reads, including
+      // when launched by a console-less desktop sidecar. Keep both registry
+      // sources and their timeout/output semantics, but never create a console.
+      { encoding: 'utf-8', timeout: MDM_SUBPROCESS_TIMEOUT_MS, windowsHide: true },
       (err, stdout) => {
         // biome-ignore lint/nursery/noFloatingPromises: resolve() is not a floating promise
         resolve({ stdout: stdout ?? '', code: err ? 1 : 0 })

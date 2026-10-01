@@ -118,6 +118,9 @@ describe('application operations: DOM -> DesktopHost -> preload -> IPC -> SSH/SF
     await screen.findByRole('button', { name: 'app.conf' })
     const grid = screen.getByTestId('application-file-lists')
     const conf = screen.getByRole('button', { name: 'conf', expanded: true })
+    // The listing and persisted layout preferences load independently. A click
+    // before preferences are ready is correctly ignored by the disabled control.
+    await waitFor(() => expect(conf).toBeEnabled())
     fireEvent.click(conf)
     expect(grid.style.gridTemplateColumns).toBe('minmax(240px, 1fr) 48px minmax(240px, 1fr) minmax(240px, 1fr)')
     fireEvent.click(screen.getByRole('button', { name: 'apps', expanded: true }))

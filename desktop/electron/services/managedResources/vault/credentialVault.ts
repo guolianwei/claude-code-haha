@@ -284,24 +284,16 @@ export type ResolveTemporaryCredentialResult =
   | { status: 'resolved'; payload: CredentialSecretInput }
   | { status: 'not-found' }
 
+type TemporaryCredentialScope = { ownerId: string; hostId: string; accountId?: string }
+
 export type TemporaryCredentialStore = {
-  prepare(input: { ownerId: string; hostId: string; payload: unknown }):
+  prepare(input: TemporaryCredentialScope & { payload: unknown }):
     | { status: 'prepared'; publish: () => void }
     | { status: 'failed'; code: 'INVALID_TEMPORARY_CREDENTIAL' }
-  provide(input: {
-    ownerId: string
-    hostId: string
-    payload: unknown
-  }): TemporaryCredentialResult
-  resolve(input: {
-    ownerId: string
-    hostId: string
-    handle: string
-  }): ResolveTemporaryCredentialResult
-  resolveLatestForOwnerHost(input: {
-    ownerId: string
-    hostId: string
-  }): ResolveTemporaryCredentialResult
+  provide(input: TemporaryCredentialScope & { payload: unknown }): TemporaryCredentialResult
+  resolve(input: TemporaryCredentialScope & { handle: string }): ResolveTemporaryCredentialResult
+  resolveLatestForOwnerHost(input: TemporaryCredentialScope): ResolveTemporaryCredentialResult
+  clearAccount(input: { hostId: string; accountId?: string }): void
   clearOwner(ownerId: string): void
   dispose(): void
 }
@@ -309,6 +301,7 @@ export type TemporaryCredentialStore = {
 type TemporaryCredentialEntry = {
   ownerId: string
   hostId: string
+  accountId: string
   payload: CredentialSecretInput
 }
 
@@ -328,15 +321,16 @@ export function createTemporaryCredentialStore(): TemporaryCredentialStore {
   let generation = 0
   const ownerGenerations = new Map<string, number>()
 
-  function prepare(input: { ownerId: string; hostId: string; payload: unknown }) {
+  function prepare(input: TemporaryCredentialScope & { payload: unknown }) {
     const owner = TemporaryOwnerInputSchema.safeParse(input?.ownerId)
     const host = TemporaryHostInputSchema.safeParse(input?.hostId)
     const payload = CredentialSecretInputSchema.safeParse(input?.payload)
-    if (!owner.success || !host.success || !payload.success) {
+    const account = TemporaryHostInputSchema.safeParse(input?.accountId ?? input?.hostId)
+    if (!owner.success || !host.success || !account.success || !payload.success) {
       return { status: 'failed' as const, code: 'INVALID_TEMPORARY_CREDENTIAL' as const }
     }
     const handle = randomUUID()
-    const entry = { ownerId: owner.data, hostId: host.data, payload: cloneTemporaryPayload(payload.data) }
+    const entry = { ownerId: owner.data, hostId: host.data, accountId: account.data, payload: cloneTemporaryPayload(payload.data) }
     const epoch = generation
     const ownerEpoch = ownerGenerations.get(owner.data) ?? 0
     let published = false
@@ -347,7 +341,7 @@ export function createTemporaryCredentialStore(): TemporaryCredentialStore {
         if (published || epoch !== generation || ownerEpoch !== (ownerGenerations.get(owner.data) ?? 0)) return
         published = true
         for (const [key, old] of entries) {
-          if (old.ownerId === entry.ownerId && old.hostId === entry.hostId) entries.delete(key)
+          if (old.ownerId === entry.ownerId && old.hostId === entry.hostId && old.accountId === entry.accountId) entries.delete(key)
         }
         entries.set(handle, entry)
       },
@@ -369,7 +363,7 @@ export function createTemporaryCredentialStore(): TemporaryCredentialStore {
       if (!owner.success || !host.success || handle.length === 0) return { status: 'not-found' }
 
       const entry = entries.get(handle)
-      if (!entry || entry.ownerId !== owner.data || entry.hostId !== host.data) {
+      if (!entry || entry.ownerId !== owner.data || entry.hostId !== host.data || entry.accountId !== (input.accountId ?? host.data)) {
         return { status: 'not-found' }
       }
       return { status: 'resolved', payload: cloneTemporaryPayload(entry.payload) }
@@ -379,11 +373,18 @@ export function createTemporaryCredentialStore(): TemporaryCredentialStore {
       const host = TemporaryHostInputSchema.safeParse(input?.hostId)
       if (!owner.success || !host.success) return { status: 'not-found' }
       for (const entry of entries.values()) {
-        if (entry.ownerId === owner.data && entry.hostId === host.data) {
+        if (entry.ownerId === owner.data && entry.hostId === host.data && entry.accountId === (input.accountId ?? host.data)) {
           return { status: 'resolved', payload: cloneTemporaryPayload(entry.payload) }
         }
       }
       return { status: 'not-found' }
+    },
+    clearAccount(input): void {
+      // Called only after a resource transaction commits; clear the replaced
+      // identity in every window without evicting other accounts on this host.
+      for (const [handle, entry] of entries) {
+        if (entry.hostId === input.hostId && entry.accountId === (input.accountId ?? input.hostId)) entries.delete(handle)
+      }
     },
     clearOwner(ownerId): void {
       const owner = TemporaryOwnerInputSchema.safeParse(ownerId)

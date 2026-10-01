@@ -124,6 +124,7 @@ function ApplicationDirectoryPanel({ target, root, refresh, onAction, expanded, 
 function ApplicationFilesWorkspace({ host, application, rootIndex, connectionId, generation, fullScreen }: { host: Host; application: HostApplication; rootIndex: number; connectionId: string; generation: number; fullScreen: boolean }) {
   const t = useTranslation()
   const label = (key: string) => t(`managedResources.appOperations.${key}` as never)
+  const loginUsername = useHostSshStore(state => state.byHostId[host.id]?.username) ?? host.username
   const [pending, setPending] = useState<Selection | null>(null)
   const [operation, setOperation] = useState<ApplicationOperation | null>(null)
   const [viewer, setViewer] = useState<{ absolutePath: string; text: string; truncated: boolean } | null>(null)
@@ -199,7 +200,7 @@ function ApplicationFilesWorkspace({ host, application, rootIndex, connectionId,
     <ConfirmDialog open={pending !== null} closeLabel={t('common.close')} onClose={() => setPending(null)}
       onConfirm={async () => { const selection = pending; setPending(null); if (selection) await perform(selection) }}
       title={pending?.action === 'delete' ? label('deleteTitle') : label('executeTitle')}
-      body={`${pending?.entry.absolutePath ?? ''}\n${pending?.action === 'delete' ? label('deleteHelp') : `${label('confirmExecution')}\n${t('managedResources.hostTools.executionUser')}: ${pending?.runAsUser || host.username}`}`}
+      body={`${pending?.entry.absolutePath ?? ''}\n${pending?.action === 'delete' ? label('deleteHelp') : `${label('confirmExecution')}\n${t('managedResources.hostTools.executionUser')}: ${pending?.runAsUser || loginUsername}`}`}
       confirmLabel={pending?.action === 'delete' ? label('delete') : label('execute')} cancelLabel={t('common.cancel')} confirmVariant="danger" />
     {viewer && <Modal open title={label('viewTitle')} closeLabel={t('common.close')} onClose={() => setViewer(null)} width={1000}>
       <p className="mb-2 break-all font-mono text-xs">{viewer.absolutePath}</p>

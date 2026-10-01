@@ -15,6 +15,7 @@ import {
   ResolveTokenInputSchema,
   RevokeTokenInputSchema,
   SftpListInputSchema,
+  SftpRenameInputSchema,
   SftpStatInputSchema,
   TransferCancelInputSchema,
   TransferGetInputSchema,
@@ -60,6 +61,7 @@ const SCHEMAS = {
   resolveToken: ResolveTokenInputSchema,
   revokeToken: RevokeTokenInputSchema,
   sftpList: SftpListInputSchema,
+  sftpRename: SftpRenameInputSchema,
   sftpStat: SftpStatInputSchema,
   transferStartDownload: TransferStartDownloadInputSchema,
   transferStartUpload: TransferStartUploadInputSchema,
@@ -93,6 +95,7 @@ function legalPayload(kind: M4PayloadKind): Record<string, unknown> {
     case 'revokeToken': return { token: randomUUID() }
     case 'sftpList':
     case 'sftpStat': return { connectionId, generation: 1, absolutePath: '/home/tester' }
+    case 'sftpRename': return { connectionId, generation: 1, absolutePath: '/home/tester/report.txt', newName: 'renamed.txt' }
     case 'transferStartDownload':
     case 'transferStartUpload': return {
       jobId: randomUUID(),
@@ -118,6 +121,7 @@ const M4_CHANNELS: Array<[M4PayloadKind, ElectronIpcChannel]> = [
   ['revokeToken', ELECTRON_IPC_CHANNELS.mrRevokeLocalToken],
   ['sftpList', ELECTRON_IPC_CHANNELS.mrSftpList],
   ['sftpStat', ELECTRON_IPC_CHANNELS.mrSftpStat],
+  ['sftpRename', ELECTRON_IPC_CHANNELS.mrSftpRename],
   ['transferStartDownload', ELECTRON_IPC_CHANNELS.mrTransferStartDownload],
   ['transferStartUpload', ELECTRON_IPC_CHANNELS.mrTransferStartUpload],
   ['transferCancel', ELECTRON_IPC_CHANNELS.mrTransferCancel],
@@ -242,6 +246,43 @@ describe('F30-01/F30-02 — M4 preload <-> main contract join', () => {
     const localPath = services.localPathService.resolveToken(minted.data.token, ownerA, 'download-target')
     expect(localPath).not.toBeNull()
     expect((await fs.readFile(localPath!)).toString('utf8')).toBe('hello-from-remote')
+  })
+
+  it('renames a remote file through preload validation, strict IPC schema and the real SFTP service', async () => {
+    await transport.seedFile('/home/tester/original.txt', 'rename-me')
+    const ipc = registerFor(windowA, ownerA)
+    const event = makeEvent(windowA)
+    const payload = {
+      connectionId: randomUUID(),
+      generation: 1,
+      absolutePath: '/home/tester/original.txt',
+      newName: 'renamed.txt',
+    }
+
+    expect(preloadAccepts(ELECTRON_IPC_CHANNELS.mrSftpRename, payload)).toBe(true)
+    expect(mainSchemaAccepts('sftpRename', payload)).toBe(true)
+    expect(MANAGED_RESOURCES_IPC_CHANNELS.sftpRename).toBe(ELECTRON_IPC_CHANNELS.mrSftpRename)
+
+    const renamed = await ipc.handlers.get(MANAGED_RESOURCES_IPC_CHANNELS.sftpRename)!(event, payload)
+    expect(renamed.ok).toBe(true)
+    expect(renamed.data).toEqual(expect.objectContaining({
+      name: 'renamed.txt',
+      absolutePath: '/home/tester/renamed.txt',
+      type: 'file',
+    }))
+    expect(await transport.fileExists('/home/tester/original.txt')).toBe(false)
+    expect((await transport.readFile('/home/tester/renamed.txt')).toString('utf8')).toBe('rename-me')
+
+    await transport.seedFile('/home/tester/existing.txt', 'keep-existing')
+    const collision = await ipc.handlers.get(MANAGED_RESOURCES_IPC_CHANNELS.sftpRename)!(event, {
+      ...payload,
+      absolutePath: '/home/tester/renamed.txt',
+      newName: 'existing.txt',
+    })
+    expect(collision.ok).toBe(false)
+    expect(collision.error.code).toBe('TARGET_EXISTS')
+    expect((await transport.readFile('/home/tester/renamed.txt')).toString('utf8')).toBe('rename-me')
+    expect((await transport.readFile('/home/tester/existing.txt')).toString('utf8')).toBe('keep-existing')
   })
 
   it('F30-01: preload and main agree on legal and illegal download payloads', () => {

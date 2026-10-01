@@ -176,6 +176,10 @@ export function validateResourceDocumentIntegrity(document: ResourceDocument): R
       host.auth.credentialId,
       host.auth.type === 'password' ? 'ssh-password' : 'ssh-private-key',
     )
+    for (const account of host.sshAccounts ?? []) {
+      expectCredential(issues, index, `hosts[${host.id}].sshAccounts[${account.id}].auth.credentialId`,
+        account.auth.credentialId, account.auth.type === 'password' ? 'ssh-password' : 'ssh-private-key')
+    }
     for (const application of host.applications) {
       for (const account of application.accounts) {
         expectCredential(
@@ -267,6 +271,9 @@ export function findResourceReferences(
   if (target.resourceType === 'credential') {
     for (const host of document.hosts) {
       if (host.auth.credentialId === target.id) add('host', host.id, 'auth.credentialId')
+      for (const account of host.sshAccounts ?? []) {
+        if (account.auth.credentialId === target.id) add('host', host.id, `sshAccounts.${account.id}.auth.credentialId`)
+      }
       for (const application of host.applications) {
         for (const account of application.accounts) {
           if (account.credentialId === target.id) {

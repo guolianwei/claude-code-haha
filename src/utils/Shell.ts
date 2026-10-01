@@ -57,6 +57,7 @@ function isExecutable(shellPath: string): boolean {
       // Try to execute the shell with --version, which should exit quickly
       // Use execFileSync to avoid shell injection vulnerabilities
       execFileSync(shellPath, ['--version'], {
+        windowsHide: true,
         timeout: 1000,
         stdio: 'ignore',
       })
@@ -331,7 +332,9 @@ export async function exec(
         ? ['pipe', 'pipe', 'pipe']
         : ['pipe', outputHandle?.fd, outputHandle?.fd],
       // Don't pass the signal - we'll handle termination ourselves with tree-kill
-      detached: provider.detached,
+      // POSIX needs a process group; Windows cleanup uses taskkill /T instead.
+      // Do not request a detached console for background Git Bash commands.
+      detached: process.platform !== 'win32' && provider.detached,
       // Prevent visible console window on Windows (no-op on other platforms)
       windowsHide: true,
     })

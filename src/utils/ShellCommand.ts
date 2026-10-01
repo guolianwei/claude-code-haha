@@ -1,7 +1,7 @@
 import type { ChildProcess } from 'child_process'
 import { stat } from 'fs/promises'
 import type { Readable } from 'stream'
-import treeKill from 'tree-kill'
+import { killProcessTree } from './killProcessTree.js'
 import { generateTaskId } from '../Task.js'
 import { formatDuration } from './format.js'
 import {
@@ -353,7 +353,7 @@ class ShellCommandImpl implements ShellCommand {
       // Bash commands are spawned detached on POSIX, so npm/vite descendants
       // share the shell's process group even if the CLI is exiting.
       killDetachedProcessGroup(this.#childProcess.pid)
-      treeKill(this.#childProcess.pid, 'SIGKILL')
+      killProcessTree(this.#childProcess.pid, 'SIGKILL')
     }
     this.#resolveExitCode(code ?? SIGKILL)
   }

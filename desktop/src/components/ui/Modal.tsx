@@ -18,6 +18,7 @@ type ModalProps = {
   children: ReactNode
   width?: number
   footer?: ReactNode
+  headerActions?: ReactNode
   variant?: 'dialog' | 'media'
   className?: string
   typography?: 'editorial' | 'interface'
@@ -31,6 +32,7 @@ export function Modal({
   children,
   width = 560,
   footer,
+  headerActions,
   variant = 'dialog',
   className = '',
   typography = 'editorial',
@@ -121,14 +123,17 @@ export function Modal({
             >
               {title}
             </h2>
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label={closeLabel}
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
-            >
-              <span className="material-symbols-outlined text-[18px]">close</span>
-            </button>
+            <div className="flex shrink-0 items-center gap-1">
+              {headerActions}
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label={closeLabel}
+                className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+              >
+                <span className="material-symbols-outlined text-[18px]">close</span>
+              </button>
+            </div>
           </div>
         )}
 

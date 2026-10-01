@@ -56,6 +56,11 @@ export async function executeExportMetadata(
       type: host.auth.type,
       credentialId: null, // Always stripped
     },
+    sshAccounts: (host.sshAccounts ?? []).map(account => ({
+      id: account.id,
+      username: account.username,
+      auth: { type: account.auth.type, credentialId: null },
+    })),
     tagIds: [...host.tagIds],
     initialDirectory: host.initialDirectory ?? null,
     applications: host.applications.map(app => ({

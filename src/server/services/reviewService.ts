@@ -1986,6 +1986,7 @@ export class ReviewService {
     const fullArgs = ['-c', 'core.quotePath=false', ...args]
     try {
       const result = await execFile('git', fullArgs, {
+        windowsHide: true,
         cwd,
         timeout: GIT_TIMEOUT_MS,
         maxBuffer: MAX_GIT_BUFFER_BYTES,

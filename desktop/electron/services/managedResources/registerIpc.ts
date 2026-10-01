@@ -36,6 +36,7 @@ import {
   RevokeTokenInputSchema,
   SftpListInputSchema,
   SftpStatInputSchema,
+  SftpRenameInputSchema,
   TransferStartDownloadInputSchema,
   TransferStartUploadInputSchema,
   FolderTransferInputSchema,
@@ -138,6 +139,7 @@ export const MANAGED_RESOURCES_IPC_CHANNELS = {
   resolveLocalToken: 'desktop:managed-resources:resolve-local-token',
   revokeLocalToken: 'desktop:managed-resources:revoke-local-token',
   sftpStat: 'desktop:managed-resources:sftp-stat',
+  sftpRename: 'desktop:managed-resources:sftp-rename',
   transferStartDownload: 'desktop:managed-resources:transfer-start-download',
   transferStartUpload: 'desktop:managed-resources:transfer-start-upload',
   transferUploadFolder: 'desktop:managed-resources:transfer-upload-folder',
@@ -448,6 +450,8 @@ export function registerManagedResourcesIpc(options: RegisterManagedResourcesIpc
     if (payload.mode === 'create' || !('id' in payload)) {
       const createInput = {
         credential: payload.credential,
+        sshAccountCredentials: payload.sshAccountCredentials,
+        sshAccounts: payload.sshAccounts,
         name: payload.name,
         address: payload.address,
         port: payload.port,
@@ -481,6 +485,7 @@ export function registerManagedResourcesIpc(options: RegisterManagedResourcesIpc
     } else {
       const res = await library.updateHost({
         credential: payload.credential,
+        sshAccountCredentials: payload.sshAccountCredentials,
         id: payload.id,
         expectedRevision: payload.expectedRevision,
         changes: payload.changes,
@@ -1043,6 +1048,7 @@ export function registerManagedResourcesIpc(options: RegisterManagedResourcesIpc
       if (msg.includes('HOST_KEY_TIMEOUT') || msg.includes('HOST_VERIFICATION_ERROR')) return 'HOST_KEY_REQUIRED'
       if (msg.includes('NO_PENDING_CHALLENGE')) return 'HOST_KEY_REQUIRED'
       if (msg.includes('AUTH_FAILED') || msg.includes('All configured authentication methods failed')) return 'AUTH_FAILED'
+      if (msg === 'SSH_ACCOUNT_NOT_FOUND' || msg === 'SSH_CREDENTIAL_MISSING' || msg === 'SSH_INTERACTIVE_AUTH_REQUIRED') return msg
       if (msg.includes('Connection limit exceeded')) return 'RESOURCE_IN_USE'
       if (msg.includes('Subscriber must be registered')) return 'DISCONNECTED'
       return 'INTERNAL_ERROR'
@@ -1070,6 +1076,7 @@ export function registerManagedResourcesIpc(options: RegisterManagedResourcesIpc
     try {
       const res = await services.sshService.createConnection({
         hostId: payload.hostId,
+        accountId: payload.accountId,
         expectedRevision: payload.expectedRevision,
         cols: payload.cols ?? 80,
         rows: payload.rows ?? 24,
@@ -1363,6 +1370,22 @@ export function registerManagedResourcesIpc(options: RegisterManagedResourcesIpc
         ownerId,
         generation: payload.generation,
         absolutePath: payload.absolutePath,
+      })
+      return successResult(result)
+    } catch (err) {
+      const mapped = mapM4Error(err)
+      return errorResult(mapped.code, mapped.messageKey, mapped.params ? { params: mapped.params } : {})
+    }
+  })
+  handle(MANAGED_RESOURCES_IPC_CHANNELS.sftpRename, SftpRenameInputSchema, async (_event, payload) => {
+    const { ownerId } = requireMainWindow()
+    try {
+      const result = await services.sftpService.rename({
+        connectionId: payload.connectionId,
+        ownerId,
+        generation: payload.generation,
+        absolutePath: payload.absolutePath,
+        newName: payload.newName,
       })
       return successResult(result)
     } catch (err) {

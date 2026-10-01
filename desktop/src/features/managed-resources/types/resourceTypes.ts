@@ -47,6 +47,13 @@ export type HostAuth = {
   credentialId: Id | null
 }
 
+/** Additional SSH identities. The legacy username/auth remains the default identity. */
+export type HostSshAccount = {
+  id: Id
+  username: string
+  auth: HostAuth
+}
+
 export type HostApplicationAccount = {
   id: Id
   label: string
@@ -74,6 +81,8 @@ export type Host = EntityMeta & {
   port: number
   username: string
   auth: HostAuth
+  /** Additive v2 upgrade: missing on older documents, normalized to [] on read. */
+  sshAccounts?: HostSshAccount[]
   tagIds: Id[]
   /** 远端绝对 POSIX 路径或 null。 */
   initialDirectory: string | null

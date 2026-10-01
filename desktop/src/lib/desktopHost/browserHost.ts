@@ -469,6 +469,9 @@ export const browserHost: DesktopHost = {
     async sftpStat() {
       return { ok: false, error: { code: 'UNAVAILABLE', messageKey: 'managedResources.errors.desktopOnly' } }
     },
+    async sftpRename() {
+      return { ok: false, error: { code: 'UNAVAILABLE', messageKey: 'managedResources.errors.desktopOnly' } }
+    },
     async transferStartDownload() {
       return { ok: false, error: { code: 'UNAVAILABLE', messageKey: 'managedResources.errors.desktopOnly' } }
     },

@@ -909,10 +909,8 @@ export function EmptySession() {
                 />
               </div>
 
-              <div className={`border-t border-[var(--color-border-separator)] pt-3 ${
-                isMobileComposer ? 'flex flex-wrap items-center gap-2' : 'flex items-center justify-between'
-              }`}>
-                <div className="flex min-w-0 shrink items-center gap-2">
+              <div data-testid="empty-session-toolbar" className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-t border-[var(--color-border-separator)] pt-3">
+                <div className={`flex min-w-0 shrink items-center gap-2 ${isMobileComposer ? '' : 'max-w-[45%]'}`}>
                   <div ref={plusMenuRef} className="relative shrink-0">
                     <IconButton
                       icon="add"
@@ -972,7 +970,7 @@ export function EmptySession() {
                   )}
                 </div>
 
-                <div className={`${isMobileComposer ? 'flex min-w-0 flex-1 items-center justify-end gap-2' : 'flex shrink-0 items-center gap-3'}`}>
+                <div className="flex min-w-0 max-w-full flex-[1_0_260px] items-center justify-end gap-2">
                   <ContextUsageIndicator
                     chatState="idle"
                     messageCount={0}
@@ -982,7 +980,7 @@ export function EmptySession() {
                     compact={isMobileComposer}
                   />
                   {managedContext.node}
-                  <ModelSelector ref={modelSelectorRef} runtimeKey={DRAFT_RUNTIME_SELECTION_KEY} disabled={isSubmitting} compact={isMobileComposer} />
+                  <ModelSelector ref={modelSelectorRef} runtimeKey={DRAFT_RUNTIME_SELECTION_KEY} disabled={isSubmitting} compact={isMobileComposer} fluid />
                   {/* Kept identical to ChatInput's send button — same
                       component, shape, size and icon. See the note there for
                       why the label went away. */}

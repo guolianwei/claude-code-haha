@@ -9,6 +9,8 @@ import { Button } from '../../../../components/ui/Button'
 import type { HostCredentialWrite } from '../../api/credentialMutationContract'
 import { resourceErrorMessage } from './resourceErrorMessage'
 import type { HostAuthType } from '../../types/resourceTypes'
+import { HostSshAccountsEditor } from './HostSshAccountsEditor'
+import { createSshAccountDraft, prepareSshAccountWrites } from './sshAccountDrafts'
 
 export type HostEditModalProps = {
   hostId: string | null
@@ -37,6 +39,7 @@ export function HostEditModal({ hostId, onClose }: HostEditModalProps) {
   const [initialDirectory, setInitialDirectory] = useState(existingHost?.initialDirectory || '')
   const [notes, setNotes] = useState(existingHost?.notes || '')
   const [replaceCredential, setReplaceCredential] = useState(!existingHost?.auth.credentialId)
+  const [accountDrafts, setAccountDrafts] = useState(() => (existingHost?.sshAccounts ?? []).map(createSshAccountDraft))
   const [newTagName, setNewTagName] = useState('')
   const [isCreatingTag, setIsCreatingTag] = useState(false)
   const creatingTag = useRef(false)
@@ -44,7 +47,7 @@ export function HostEditModal({ hostId, onClose }: HostEditModalProps) {
   const [formError, setFormError] = useState<string | null>(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
 
-  const isAuthTypeChanged = existingHost ? authType !== existingHost.auth.type : false
+  const isIdentityChanged = existingHost ? authType !== existingHost.auth.type || username.trim() !== existingHost.username : false
 
   const toggleTag = (tagId: string) => {
     if (selectedTagIds.includes(tagId)) {
@@ -93,7 +96,7 @@ export function HostEditModal({ hostId, onClose }: HostEditModalProps) {
       return
     }
 
-    const needsNewCredential = isAuthTypeChanged || replaceCredential || !existingHost
+    const needsNewCredential = isIdentityChanged || replaceCredential || !existingHost
 
     if (needsNewCredential) {
       if (authType === 'password' && !password) {
@@ -104,6 +107,16 @@ export function HostEditModal({ hostId, onClose }: HostEditModalProps) {
         setFormError(t('managedResources.enterKeyError') || '请输入 SSH 私钥 PEM 内容')
         return
       }
+    }
+
+    let accountSave: ReturnType<typeof prepareSshAccountWrites>
+    try { accountSave = prepareSshAccountWrites(accountDrafts, username) }
+    catch (error) {
+      const code = error instanceof Error ? error.message : 'INVALID_ARGUMENT'
+      setFormError(code === 'SSH_DUPLICATE_USERNAME'
+        ? t('managedResources.sshAccounts.duplicate' as never)
+        : code === 'SSH_CREDENTIAL_MISSING' ? t('managedResources.enterPasswordError') : resourceErrorMessage(t, { code }))
+      return
     }
 
     if (submitting.current) return
@@ -117,13 +130,14 @@ export function HostEditModal({ hostId, onClose }: HostEditModalProps) {
           : { kind: 'ssh-private-key', privateKeyPem: privateKeyPem.trim(), ...(passphrase ? { passphrase } : {}) },
       } : undefined
       const metadata = {
+        sshAccounts: accountSave.sshAccounts,
         name: name.trim(), address: address.trim(), port, username: username.trim(),
         auth: { type: authType, credentialId: needsNewCredential ? null : existingHost?.auth.credentialId ?? null },
         tagIds: selectedTagIds, initialDirectory: initialDirectory.trim() || null, notes: notes.trim(),
       }
       const result = await saveHost(existingHost
-        ? { id: existingHost.id, expectedRevision: existingHost.revision, changes: metadata, credential }
-        : { ...metadata, applications: [], credential })
+        ? { id: existingHost.id, expectedRevision: existingHost.revision, changes: metadata, credential, sshAccountCredentials: accountSave.sshAccountCredentials }
+        : { ...metadata, applications: [], credential, sshAccountCredentials: accountSave.sshAccountCredentials })
       if (!result.success) {
         setFormError(resourceErrorMessage(t, result.error))
         return
@@ -131,6 +145,7 @@ export function HostEditModal({ hostId, onClose }: HostEditModalProps) {
       setPassword('')
       setPrivateKeyPem('')
       setPassphrase('')
+      setAccountDrafts([])
       onClose()
     } catch {
       setFormError(resourceErrorMessage(t))
@@ -145,6 +160,7 @@ export function HostEditModal({ hostId, onClose }: HostEditModalProps) {
     setPassword('')
     setPrivateKeyPem('')
     setPassphrase('')
+    setAccountDrafts([])
     onClose()
   }
 
@@ -251,7 +267,7 @@ export function HostEditModal({ hostId, onClose }: HostEditModalProps) {
           </div>
 
           {/* Existing Credential status */}
-          {existingHost?.auth.credentialId && !replaceCredential && !isAuthTypeChanged && (
+          {existingHost?.auth.credentialId && !replaceCredential && !isIdentityChanged && (
             <div className="flex items-center justify-between rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 text-xs">
               <div className="flex items-center gap-2 text-[var(--color-text-secondary)]">
                 <KeyRound size={16} className="text-[var(--color-brand)]" />
@@ -269,9 +285,9 @@ export function HostEditModal({ hostId, onClose }: HostEditModalProps) {
           )}
 
           {/* New Credential Inputs */}
-          {(!existingHost?.auth.credentialId || replaceCredential || isAuthTypeChanged) && (
+          {(!existingHost?.auth.credentialId || replaceCredential || isIdentityChanged) && (
             <div className="flex flex-col gap-3 pt-2 border-t border-[var(--color-border)]">
-              {existingHost?.auth.credentialId && !isAuthTypeChanged && (
+              {existingHost?.auth.credentialId && !isIdentityChanged && (
                 <div className="flex justify-end">
                   <button
                     type="button"
@@ -282,9 +298,9 @@ export function HostEditModal({ hostId, onClose }: HostEditModalProps) {
                   </button>
                 </div>
               )}
-              {isAuthTypeChanged && (
+              {isIdentityChanged && (
                 <div className="rounded-[var(--radius-sm)] bg-[var(--color-surface-container)] p-2 text-xs text-[var(--color-brand)]">
-                  {t('managedResources.authTypeChangedMustEnterNewCred') || '认证方式已变更，必须输入匹配种类的新凭据'}
+                  {t('managedResources.sshAccounts.identityChanged' as never)}
                 </div>
               )}
 
@@ -299,7 +315,7 @@ export function HostEditModal({ hostId, onClose }: HostEditModalProps) {
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder={t('managedResources.passwordPlaceholder') || '输入服务器 SSH 密码'}
                     size="sm"
-                    required={!existingHost || replaceCredential || isAuthTypeChanged}
+                    required={!existingHost || replaceCredential || isIdentityChanged}
                     className="pr-8 font-mono"
                   />
                   <button
@@ -323,7 +339,7 @@ export function HostEditModal({ hostId, onClose }: HostEditModalProps) {
                     value={privateKeyPem}
                     onChange={(e) => setPrivateKeyPem(e.target.value)}
                     placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;...&#10;-----END OPENSSH PRIVATE KEY-----"
-                    required={!existingHost || replaceCredential || isAuthTypeChanged}
+                    required={!existingHost || replaceCredential || isIdentityChanged}
                     className="font-mono text-xs"
                   />
                   <Input
@@ -380,6 +396,8 @@ export function HostEditModal({ hostId, onClose }: HostEditModalProps) {
             </div>
           )}
         </div>
+
+        <HostSshAccountsEditor accounts={accountDrafts} onChange={setAccountDrafts} />
 
         {/* Tags */}
         <div>

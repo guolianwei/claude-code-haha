@@ -1342,6 +1342,7 @@ async function runGitInfoCommand(workDir: string, args: string[]): Promise<strin
 
   try {
     proc = Bun.spawn(['git', ...args], {
+      windowsHide: true,
       cwd: workDir,
       stdin: 'ignore',
       stdout: 'pipe',

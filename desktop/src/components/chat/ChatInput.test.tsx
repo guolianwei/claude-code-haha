@@ -2599,10 +2599,11 @@ describe('ChatInput file mentions', () => {
     render(<ChatInput compact />)
     expect(screen.getByTestId('chat-input-toolbar-leading')).toHaveClass('shrink-0')
     if (width >= 530) {
-      expect(screen.getByTestId('chat-input-toolbar-leading')).toHaveClass('max-w-[55%]')
+      expect(screen.getByTestId('chat-input-toolbar-leading')).toHaveClass('max-w-[45%]')
       expect(screen.getByTestId('chat-input-toolbar-location')).toHaveClass('min-w-0', 'flex-1')
     }
-    expect(screen.getByTestId('chat-input-toolbar-trailing')).toHaveClass('min-w-0', 'flex-1', 'justify-end')
+    expect(screen.getByTestId('chat-input-toolbar-trailing')).toHaveClass('min-w-0', 'flex-[1_0_260px]', 'justify-end')
+    expect(screen.getByTestId('chat-input-toolbar')).toHaveClass('flex-wrap')
     expect(screen.getByTestId('model-selector-shell')).toHaveClass('min-w-0', 'flex-1')
     expect(screen.getByRole('button', { name: 'Run' })).toHaveClass('shrink-0')
   })
@@ -2639,7 +2640,7 @@ describe('ChatInput file mentions', () => {
     expect(screen.getByTestId('chat-input-panel')).toHaveClass('rounded-[var(--radius-2xl)]')
     expect(screen.getByTestId('chat-input-panel')).not.toHaveClass('rounded-b-none')
     expect(screen.getByTestId('chat-input-toolbar-leading')).toHaveClass('shrink-0', 'gap-1')
-    expect(screen.getByTestId('chat-input-toolbar-trailing')).toHaveClass('min-w-0', 'flex-1', 'justify-end', 'gap-1')
+    expect(screen.getByTestId('chat-input-toolbar-trailing')).toHaveClass('min-w-0', 'flex-[1_0_260px]', 'justify-end', 'gap-1')
     expect(screen.getByTestId('model-selector-shell')).toHaveClass('min-w-0', 'flex-1')
 
     setComposerText('@cond', 5)

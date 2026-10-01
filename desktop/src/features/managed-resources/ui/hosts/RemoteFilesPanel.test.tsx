@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import editorStyles from './remoteFileEditor.css?inline'
 
@@ -100,12 +100,20 @@ function installFixture() {
         gid: 1000,
         absolutePath,
       },
-      entries: absolutePath === '/home/fixture' ? [dirEntry, fileEntry] : [],
+      entries: absolutePath === '/home/fixture' ? listedEntries : [],
     },
   }))
   const remoteEditOpen = vi.fn(async () => ({ ok: true as const, data: snapshot() }))
   const remoteEditSave = vi.fn(async (_id: string, _base: string, text: string) => ({ ok: true as const, data: snapshot(text, 'rev-2') }))
   const remoteEditClose = vi.fn(async () => ({ ok: true as const, data: { ok: true as const } }))
+  let listedEntries = [dirEntry, fileEntry]
+  const sftpRename = vi.fn(async (_connectionId: string, _generation: number, absolutePath: string, newName: string) => {
+    const original = listedEntries.find(entry => entry.absolutePath === absolutePath)!
+    const parent = absolutePath.slice(0, absolutePath.lastIndexOf('/')) || '/'
+    const renamed = { ...original, name: newName, absolutePath: parent === '/' ? `/${newName}` : `${parent}/${newName}` }
+    listedEntries = listedEntries.map(entry => entry.absolutePath === absolutePath ? renamed : entry)
+    return { ok: true as const, data: renamed }
+  })
   const transferStartUpload = vi.fn(async (_job: string, _connection: string, _generation: number, remotePath: string) => ({
     ok: true as const,
     data: completedJob('upload', remotePath),
@@ -137,6 +145,7 @@ function installFixture() {
     },
     async disconnect() { return { ok: true as const, data: undefined } },
     sftpList,
+    sftpRename,
     remoteEditOpen,
     remoteEditSave,
     remoteEditClose,
@@ -168,7 +177,7 @@ function installFixture() {
     async revokeLocalToken() { return { ok: true as const, data: { ok: true as const } } },
   }
   ;(window as any).desktopHost = { ...browserHost, hostManagement }
-  return { sftpList, remoteEditOpen, remoteEditSave, remoteEditClose, transferStartUpload, transferStartDownload }
+  return { sftpList, sftpRename, remoteEditOpen, remoteEditSave, remoteEditClose, transferStartUpload, transferStartDownload }
 }
 
 beforeEach(async () => {
@@ -205,7 +214,28 @@ describe('M4 RemoteFilesPanel production entry', () => {
     expect(editor).toHaveValue('changed\n')
   })
 
+  it('shows modification time and renames files without leaving the remote file panel', async () => {
+    const fixture = installFixture()
+    await useHostSshStore.getState().start(host, 80, 24)
+    render(<RemoteFilesPanel host={host} />)
+
+    const fileName = await screen.findByText('notes.txt')
+    const row = fileName.closest<HTMLElement>('[role="listitem"]')!
+    expect(within(row).getByTestId('remote-file-modified')).toHaveTextContent(/Modified:/)
+    fireEvent.click(within(row).getByRole('button', { name: /^rename$/i }))
+    const name = await screen.findByRole('textbox', { name: /new name/i })
+    fireEvent.change(name, { target: { value: 'renamed.txt' } })
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: /^rename$/i }))
+
+    await waitFor(() => expect(fixture.sftpRename).toHaveBeenCalledWith(
+      '22222222-2222-4222-8222-222222222222', 1, '/home/fixture/notes.txt', 'renamed.txt',
+    ))
+    expect(await screen.findByText('renamed.txt')).toBeInTheDocument()
+    expect(screen.queryByText('notes.txt')).not.toBeInTheDocument()
+  })
+
   it('keeps the file list and editor in independent side-by-side panes', async () => {
+
     installFixture()
     await useHostSshStore.getState().start(host, 80, 24)
     render(<RemoteFilesPanel host={host} />)

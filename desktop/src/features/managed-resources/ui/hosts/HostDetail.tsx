@@ -1,4 +1,4 @@
-import { useId, useState, type KeyboardEvent } from 'react'
+import { useEffect, useId, useState, type KeyboardEvent } from 'react'
 import { Edit3, Trash2, Layers, Plus, ShieldAlert, TerminalSquare, FolderOpen } from 'lucide-react'
 import { useHostManagementStore } from '../../stores/hostManagementStore'
 import { useTranslation } from '../../../../i18n'
@@ -16,13 +16,16 @@ import { ApplicationFilesPanel } from './ApplicationFilesPanel'
 import { JavaProcessesPanel } from './JavaProcessesPanel'
 import { HostAuthenticationSection } from './HostAuthenticationSection'
 import { ProtectedPasswordReveal } from '../ProtectedPasswordReveal'
+import { findHostSshAccount } from '../../types/hostSshAccounts'
+import { isHostSshBusy, useHostSshStore } from '../../stores/hostSshStore'
 
 export type HostDetailProps = {
   onOpenTagModal?: () => void
   onOpenImportExport?: () => void
+  terminalRequest?: { hostId: string; requestId: number } | null
 }
 
-export function HostDetail(_props: HostDetailProps) {
+export function HostDetail({ terminalRequest }: HostDetailProps) {
   const t = useTranslation()
   const {
     selectedHost,
@@ -33,15 +36,20 @@ export function HostDetail(_props: HostDetailProps) {
   } = useHostManagementStore()
 
   const host = selectedHost()
+  const sshEntry = useHostSshStore(state => host ? state.byHostId[host.id] : undefined)
+  const selectedAccountId = useHostSshStore(state => host ? state.selectedAccountByHostId[host.id] : undefined)
   const [isDeleting, setIsDeleting] = useState(false)
   const [showDeleteHostConfirm, setShowDeleteHostConfirm] = useState(false)
   const [appToDelete, setAppToDelete] = useState<HostApplication | null>(null)
   const [referencingErrors, setReferencingErrors] = useState<HostManagementErrorReference[] | null>(null)
   const [deleteError, setDeleteError] = useState<string | null>(null)
   const [editingApp, setEditingApp] = useState<{ isNew: boolean; app?: HostApplication } | null>(null)
-  const [connectionView, setConnectionView] = useState<'terminal' | 'files' | 'applications' | 'java' | 'mysql' | 'redis'>('terminal')
+  const [connectionView, setConnectionView] = useState<'terminal' | 'files' | 'applications' | 'java' | 'mysql' | 'redis' | 'nginx' | 'keepalived'>('terminal')
   const [filesVisited, setFilesVisited] = useState(false)
   const workspaceId = useId()
+  useEffect(() => {
+    if (host && terminalRequest?.hostId === host.id) setConnectionView('terminal')
+  }, [host?.id, terminalRequest?.hostId, terminalRequest?.requestId])
   const handleTabKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
     const tabs = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
@@ -69,6 +77,7 @@ export function HostDetail(_props: HostDetailProps) {
   }
 
   const hostTags = tags.filter((t) => host.tagIds.includes(t.id))
+  const loginUsername = isHostSshBusy(sshEntry) ? sshEntry?.username ?? host.username : findHostSshAccount(host, selectedAccountId)?.username ?? '—'
 
   const handleDeleteHostConfirm = async () => {
     setIsDeleting(true)
@@ -116,8 +125,8 @@ export function HostDetail(_props: HostDetailProps) {
       <div className="flex shrink-0 items-center justify-between gap-4 border-b border-[var(--color-border)] pb-4">
         <div className="flex min-w-0 flex-1 items-center gap-3 overflow-hidden whitespace-nowrap" data-testid="host-summary-line">
           <h1 className="max-w-[32%] shrink-0 truncate text-lg font-bold text-[var(--color-text-primary)]" data-testid="host-summary-name" title={host.name}>{host.name}</h1>
-          <span className="min-w-0 max-w-[38%] truncate rounded-[var(--radius-sm)] bg-[var(--color-surface-container)] px-2 py-0.5 text-xs font-mono text-[var(--color-text-secondary)]" data-testid="host-summary-endpoint" title={`${host.username}@${host.address}:${host.port}`}>
-            {host.username}@{host.address}:{host.port}
+          <span className="min-w-0 max-w-[38%] truncate rounded-[var(--radius-sm)] bg-[var(--color-surface-container)] px-2 py-0.5 text-xs font-mono text-[var(--color-text-secondary)]" data-testid="host-summary-endpoint" title={`${loginUsername}@${host.address}:${host.port}`}>
+            {loginUsername}@{host.address}:{host.port}
           </span>
           {hostTags.length > 0 && (
             <div className="flex min-w-0 items-center gap-1.5 overflow-hidden" data-testid="host-summary-tags">
@@ -220,7 +229,7 @@ export function HostDetail(_props: HostDetailProps) {
             className={`inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)] ${connectionView === 'java' ? 'border-[var(--color-brand)] text-[var(--color-brand)]' : 'border-transparent text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'}`}>
             <Layers size={14} />{t('managedResources.hostTools.javaProcesses')}
           </button>
-          {(['mysql', 'redis'] as const).map(kind => (
+          {(['mysql', 'redis', 'nginx', 'keepalived'] as const).map(kind => (
             <button key={kind} type="button" role="tab" aria-selected={connectionView === kind} data-testid={`host-${kind}-tab`}
               id={`${workspaceId}-${kind}-tab`} aria-controls={`${workspaceId}-${kind}-panel`} tabIndex={connectionView === kind ? 0 : -1}
               onClick={() => setConnectionView(kind)}
@@ -232,7 +241,7 @@ export function HostDetail(_props: HostDetailProps) {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col pt-3">
           {/* Keep the active host's terminal buffer and edit draft across tabs. */}
           <div className="min-h-0 flex-1" data-testid="host-terminal-panel" role="tabpanel" id={`${workspaceId}-terminal-panel`} aria-labelledby={`${workspaceId}-terminal-tab`} hidden={connectionView !== 'terminal'}>
-            <SshConsole key={host.id} host={host as Host} />
+            <SshConsole key={host.id} host={host as Host} showConnectAction={false} />
           </div>
           <div className="h-full min-h-0 overflow-y-auto" role="tabpanel" id={`${workspaceId}-files-panel`} aria-labelledby={`${workspaceId}-files-tab`} hidden={connectionView !== 'files'}>
             {filesVisited && <RemoteFilesPanel key={host.id} host={host as Host} />}
@@ -240,7 +249,7 @@ export function HostDetail(_props: HostDetailProps) {
           {connectionView === 'java' && <div className="h-full min-h-0 overflow-y-auto" role="tabpanel" id={`${workspaceId}-java-panel`} aria-labelledby={`${workspaceId}-java-tab`}>
             <JavaProcessesPanel key={host.id} host={host} onConnect={() => setConnectionView('terminal')} />
           </div>}
-          {(connectionView === 'mysql' || connectionView === 'redis') && (
+          {(connectionView === 'mysql' || connectionView === 'redis' || connectionView === 'nginx' || connectionView === 'keepalived') && (
             <div className="h-full min-h-0 overflow-y-auto" role="tabpanel" id={`${workspaceId}-${connectionView}-panel`} aria-labelledby={`${workspaceId}-${connectionView}-tab`}>
               <JavaProcessesPanel key={`${host.id}:${connectionView}`} host={host} processKind={connectionView} onConnect={() => setConnectionView('terminal')} />
             </div>

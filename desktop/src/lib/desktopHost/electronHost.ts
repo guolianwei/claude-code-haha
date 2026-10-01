@@ -421,6 +421,8 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
         invoke(ELECTRON_IPC_CHANNELS.mrSftpList, { connectionId, generation, absolutePath }),
       sftpStat: (connectionId, generation, absolutePath) =>
         invoke(ELECTRON_IPC_CHANNELS.mrSftpStat, { connectionId, generation, absolutePath }),
+      sftpRename: (connectionId, generation, absolutePath, newName) =>
+        invoke(ELECTRON_IPC_CHANNELS.mrSftpRename, { connectionId, generation, absolutePath, newName }),
       transferStartDownload: (jobId, connectionId, generation, remotePath, localToken) =>
         invokeProjected(
           ELECTRON_IPC_CHANNELS.mrTransferStartDownload,

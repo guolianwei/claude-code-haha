@@ -3,15 +3,18 @@ import { Terminal as XTermTerminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { Cable, ShieldAlert, TerminalSquare, Unplug } from 'lucide-react'
 import '@xterm/xterm/css/xterm.css'
-import { useHostSshStore } from '../../stores/hostSshStore'
+import { isHostSshBusy, useHostSshStore } from '../../stores/hostSshStore'
 import { subscribeTerminalOutput } from '../../stores/terminalOutputReplay'
 import { useTranslation } from '../../../../i18n'
 import { getDesktopHost } from '../../../../lib/desktopHost'
 import type { Host } from '../../types/resourceTypes'
 import type { HostManagementEvent } from '../../types/resourceTypes'
+import { findHostSshAccount } from '../../types/hostSshAccounts'
+import { useHostManagementStore } from '../../stores/hostManagementStore'
 
 type Props = {
   host: Host
+  showConnectAction?: boolean
 }
 
 type Translator = ReturnType<typeof useTranslation>
@@ -38,18 +41,20 @@ function statusLabel(t: Translator, status: ReturnType<typeof useHostSshStore.ge
 }
 
 function errorLabel(t: Translator, error: string): string {
-  const key = `managedResources.errors.${error}`
+  const key = error.startsWith('managedResources.') ? error : `managedResources.errors.${error}`
   const translated = t(key as never)
   return translated && translated !== key ? translated : error
 }
 
-export function SshConsole({ host }: Props) {
+export function SshConsole({ host, showConnectAction = true }: Props) {
 
   const containerRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<XTermTerminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const t = useTranslation()
   const entry = useHostSshStore(state => state.byHostId[host.id])
+  const selectedAccountId = useHostSshStore(state => state.selectedAccountByHostId[host.id])
+  const loginUsername = isHostSshBusy(entry) ? entry?.username ?? host.username : findHostSshAccount(host, selectedAccountId)?.username ?? '—'
 
   // Mount xterm only after the user initiates a connection. This keeps
   // jsdom tests from exercising xterm (which needs canvas metrics) and lets
@@ -100,7 +105,7 @@ export function SshConsole({ host }: Props) {
       if (event.connectionId !== connectionId || event.generation !== generation) return
       if (event.type === 'connection-state') {
         if (event.status === 'ready') term.writeln('\x1b[32m[connected]\x1b[0m')
-        else if (event.status === 'failed') term.writeln(`\x1b[31m[failed] ${event.error ?? 'unknown'}\x1b[0m`)
+        else if (event.status === 'failed') term.writeln(`\x1b[31m[failed] ${errorLabel(t, event.error ?? 'SSH_ERROR')}\x1b[0m`)
         else if (event.status === 'closing' || event.status === 'closed') term.writeln('\x1b[33m[closed]\x1b[0m')
       }
     }).then(unlisten => {
@@ -144,7 +149,7 @@ export function SshConsole({ host }: Props) {
           <TerminalSquare size={16} className="shrink-0 text-[var(--color-success)]" />
           <div className="min-w-0">
             <div className="text-xs font-semibold text-[var(--color-text-primary)]">{t('managedResources.ssh.title' as never) || 'SSH Terminal'}</div>
-            <div className="truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">{host.username}@{host.address}:{host.port}</div>
+            <div className="truncate font-mono text-[10px] text-[var(--color-text-tertiary)]">{loginUsername}@{host.address}:{host.port}</div>
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
@@ -152,7 +157,7 @@ export function SshConsole({ host }: Props) {
             {statusLabel(t, entry)}
           </span>
           {!entry || entry.status === 'idle' || entry.status === 'closed' || entry.status === 'failed' ? (
-            <button
+            showConnectAction ? <button
               type="button"
               className="inline-flex items-center gap-1.5 rounded border border-[var(--color-success)] bg-[var(--color-success-container)] px-2.5 py-1.5 text-xs font-medium text-[var(--color-on-success-container)] hover:bg-[var(--color-surface-hover)]"
               onClick={start}
@@ -160,7 +165,7 @@ export function SshConsole({ host }: Props) {
             >
               <Cable size={13} />
               {t('managedResources.ssh.connect') || '连接'}
-            </button>
+            </button> : null
           ) : (
             <button
               type="button"
@@ -209,6 +214,10 @@ export function SshConsole({ host }: Props) {
       {entry?.lastError && entry.status === 'failed' ? (
         <div className="mx-3 mt-3 rounded-[var(--radius-md)] border border-[var(--color-error)] bg-[var(--color-error-container)] px-3 py-2 text-xs text-[var(--color-on-error-container)]" role="alert">
           {errorLabel(t, entry.lastError)}
+          {['AUTH_FAILED', 'SSH_CREDENTIAL_MISSING', 'DECRYPT_FAILED', 'INVALID_CREDENTIAL_PAYLOAD'].includes(entry.lastError) && <button
+            type="button" className="ml-3 underline" onClick={() => useHostManagementStore.getState().setEditingHostId(host.id)}>
+            {t('managedResources.sshAccounts.editCredentials' as never)}
+          </button>}
         </div>
       ) : null}
       <div className="relative min-h-0 flex-1 bg-[var(--color-surface)] p-2" data-testid="ssh-terminal-viewport">

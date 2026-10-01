@@ -9,6 +9,7 @@ import { useHostManagementStore } from '../../stores/hostManagementStore'
 import { useSettingsStore } from '../../../../stores/settingsStore'
 import { browserHost } from '../../../../lib/desktopHost/browserHost'
 import type { Host, ResourceTag } from '../../types/resourceTypes'
+import { useHostSshStore } from '../../stores/hostSshStore'
 
 const sampleTag: ResourceTag = {
   id: 'tag-1',
@@ -63,6 +64,7 @@ describe('Host Workbench UI Components (M2.1 - M2.4)', () => {
   beforeEach(() => {
     ;(window as any).desktopHost = { ...browserHost }
     useSettingsStore.setState({ locale: 'zh' })
+    useHostSshStore.setState(useHostSshStore.getInitialState(), true)
     useHostManagementStore.setState({
       hosts: [sampleHost],
       tags: [sampleTag],
@@ -107,6 +109,25 @@ describe('Host Workbench UI Components (M2.1 - M2.4)', () => {
 
       expect(useHostManagementStore.getState().selectedHostId).toBe('host-1')
     })
+
+    it('selects an SSH user on the host card and starts the connection from the card action', async () => {
+      const operator = { id: 'ssh-operator', username: 'operator', auth: { type: 'password' as const, credentialId: 'cred-operator' } }
+      const hostWithAccounts = { ...sampleHost, sshAccounts: [operator] }
+      useHostManagementStore.setState({ hosts: [hostWithAccounts], selectedHostId: null })
+      const start = vi.fn(async () => {})
+      const onRequestTerminal = vi.fn()
+      useHostSshStore.setState({ ...useHostSshStore.getInitialState(), start })
+
+      render(<HostList onRequestTerminal={onRequestTerminal} />)
+      const selector = screen.getByTestId('ssh-account-select')
+      fireEvent.change(selector, { target: { value: operator.id } })
+      expect(useHostSshStore.getState().selectedAccountByHostId[hostWithAccounts.id]).toBe(operator.id)
+      fireEvent.click(screen.getByRole('button', { name: '连接' }))
+
+      expect(useHostManagementStore.getState().selectedHostId).toBe(hostWithAccounts.id)
+      expect(start).toHaveBeenCalledWith(hostWithAccounts, 80, 24)
+      expect(onRequestTerminal).toHaveBeenCalledWith(hostWithAccounts.id)
+    })
   })
 
   describe('HostDetail component', () => {
@@ -134,6 +155,7 @@ describe('Host Workbench UI Components (M2.1 - M2.4)', () => {
       expect(screen.getByTestId('host-applications-tab')).toHaveAttribute('aria-selected', 'false')
       expect(screen.getByRole('region', { name: /SSH 终端输出|SSH terminal output/i })).toBeInTheDocument()
       expect(screen.getByText(/未连接|未連線|Disconnected|Not connected|연결되지 않음|未接続/i)).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: '连接' })).toBeNull()
       expect(screen.queryByText('Nginx Proxy')).not.toBeInTheDocument()
 
       fireEvent.click(screen.getByTestId('host-applications-tab'))
@@ -147,7 +169,7 @@ describe('Host Workbench UI Components (M2.1 - M2.4)', () => {
       expect(screen.getByText(/Admin Account \(admin\)/i)).toBeInTheDocument()
     })
 
-    it('navigates all six workspace tabs by keyboard and exposes only the active panel', () => {
+    it('navigates all eight workspace tabs by keyboard and exposes only the active panel', () => {
       useHostManagementStore.setState({ selectedHostId: 'host-1' })
       render(<HostDetail />)
       const terminal = screen.getByTestId('host-terminal-tab')
@@ -158,11 +180,15 @@ describe('Host Workbench UI Components (M2.1 - M2.4)', () => {
       expect(files).toHaveAttribute('aria-selected', 'true')
       expect(screen.getByRole('tabpanel')).toHaveAttribute('id', files.getAttribute('aria-controls'))
       fireEvent.keyDown(files, { key: 'End' })
-      const redis = screen.getByTestId('host-redis-tab')
-      expect(redis).toHaveFocus()
-      expect(redis).toHaveAttribute('aria-selected', 'true')
-      expect(screen.getByRole('tabpanel')).toHaveAttribute('id', redis.getAttribute('aria-controls'))
-      fireEvent.keyDown(redis, { key: 'ArrowLeft' })
+      const keepalived = screen.getByTestId('host-keepalived-tab')
+      expect(keepalived).toHaveFocus()
+      expect(keepalived).toHaveAttribute('aria-selected', 'true')
+      expect(screen.getByRole('tabpanel')).toHaveAttribute('id', keepalived.getAttribute('aria-controls'))
+      fireEvent.keyDown(keepalived, { key: 'ArrowLeft' })
+      expect(screen.getByTestId('host-nginx-tab')).toHaveFocus()
+      fireEvent.keyDown(screen.getByTestId('host-nginx-tab'), { key: 'ArrowLeft' })
+      expect(screen.getByTestId('host-redis-tab')).toHaveFocus()
+      fireEvent.keyDown(screen.getByTestId('host-redis-tab'), { key: 'ArrowLeft' })
       expect(screen.getByTestId('host-mysql-tab')).toHaveFocus()
       fireEvent.keyDown(screen.getByTestId('host-mysql-tab'), { key: 'ArrowLeft' })
       const java = screen.getByTestId('host-java-tab')
@@ -176,6 +202,16 @@ describe('Host Workbench UI Components (M2.1 - M2.4)', () => {
       expect(terminal).toHaveFocus()
       expect(screen.queryByText('Nginx Proxy')).not.toBeInTheDocument()
       expect(screen.getAllByRole('tabpanel')).toHaveLength(1)
+    })
+
+    it('returns to the terminal tab when a host-card connection requests it', () => {
+      useHostManagementStore.setState({ selectedHostId: 'host-1' })
+      const view = render(<HostDetail terminalRequest={null} />)
+      fireEvent.click(screen.getByTestId('host-applications-tab'))
+      expect(screen.getByTestId('host-applications-tab')).toHaveAttribute('aria-selected', 'true')
+      view.rerender(<HostDetail terminalRequest={{ hostId: 'host-1', requestId: 1 }} />)
+      expect(screen.getByTestId('host-terminal-tab')).toHaveAttribute('aria-selected', 'true')
+      expect(screen.getByTestId('host-terminal-panel')).not.toHaveAttribute('hidden')
     })
 
     it('opens ConfirmDialog for host deletion instead of browser confirm', async () => {

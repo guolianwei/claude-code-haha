@@ -6,6 +6,7 @@ import path from 'node:path'
 import { createHostWorkbenchHarness } from '../../../test/hostWorkbenchHarness'
 import { HostsWorkspace } from '../ui/HostsWorkspace'
 import { useHostManagementStore } from '../stores/hostManagementStore'
+import { useHostSshStore } from '../stores/hostSshStore'
 import { useSettingsStore } from '../../../stores/settingsStore'
 import { t } from '../../../i18n'
 import { ELECTRON_IPC_CHANNELS } from '../../../../electron/ipc/channels'
@@ -19,6 +20,7 @@ beforeEach(async () => {
 })
 afterEach(async () => {
   cleanup()
+  useHostSshStore.getState().teardownAll()
   await fixture?.dispose()
 })
 
@@ -93,6 +95,58 @@ describe('M2 real DOM -> store -> DesktopHost -> IPC -> repository', () => {
     await openWorkspace()
     await waitFor(() => expect(useHostManagementStore.getState().hosts).toHaveLength(1))
     expect(useHostManagementStore.getState().hosts[0]!.tagIds).toEqual(doc.hosts[0]!.tagIds)
+  })
+
+  it('maintains multiple SSH accounts, displays independent password verification, and selects a login', async () => {
+    await openWorkspace()
+    const dialog = await newHost()
+    fireEvent.click(within(dialog).getByRole('button', { name: t('managedResources.sshAccounts.add') }))
+    const editor = within(dialog).getByTestId('ssh-accounts-editor')
+    fireEvent.change(editor.querySelector('input[id$="-username"]')!, { target: { value: 'operator' } })
+    fireEvent.change(editor.querySelector('input[type=password]')!, { target: { value: 'EXTRA_DOM_FIXTURE_ONLY' } })
+    await saveDialog(dialog)
+    let doc = await fixture.document()
+    const original = doc.hosts[0]!
+    const extra = original.sshAccounts![0]!
+    expect(extra.username).toBe('operator')
+    expect(extra.auth.credentialId).not.toBe(original.auth.credentialId)
+    expect(doc.credentials).toHaveLength(2)
+    expect(JSON.stringify(useHostManagementStore.getState())).not.toContain('EXTRA_DOM_FIXTURE_ONLY')
+    expect(await fs.readFile(fixture.services.store.filePath, 'utf8')).not.toContain('EXTRA_DOM_FIXTURE_ONLY')
+    selectHost()
+    fireEvent.change(screen.getByTestId('ssh-account-select'), { target: { value: extra.id } })
+    expect(useHostSshStore.getState().selectedAccountByHostId[original.id]).toBe(extra.id)
+    expect(screen.getByTestId('host-summary-endpoint')).toHaveTextContent('operator@fixture.invalid:22')
+    fireEvent.click(screen.getByTestId('host-authentication-toggle'))
+    expect(screen.getAllByRole('button', { name: t('managedResources.passwordReveal.reveal') })).toHaveLength(2)
+    fireEvent.click(screen.getByTestId('host-authentication-toggle'))
+    expect(screen.queryByRole('button', { name: t('managedResources.passwordReveal.reveal') })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: t('managedResources.editHost') }))
+    const edit = await screen.findByRole('dialog', { name: t('managedResources.editHost') })
+    fireEvent.click(within(edit).getByRole('button', { name: t('managedResources.sshAccounts.remove') + ': operator' }))
+    await saveDialog(edit)
+    doc = await fixture.document()
+    expect(doc.hosts[0]!.sshAccounts).toEqual([])
+    expect(doc.credentials.map(record => record.id)).toEqual([original.auth.credentialId])
+    expect(screen.getByTestId('ssh-account-select')).toHaveDisplayValue(t('managedResources.sshAccounts.missing'))
+  })
+
+  it('requires a new password when the default SSH username changes', async () => {
+    await openWorkspace()
+    await saveDialog(await newHost())
+    const original = (await fixture.document()).hosts[0]!
+    selectHost()
+    fireEvent.click(screen.getByRole('button', { name: t('managedResources.editHost') }))
+    const dialog = await screen.findByRole('dialog', { name: t('managedResources.editHost') })
+    fill(dialog, 'host-username-input', 'renamed-fixture')
+    expect(within(dialog).getByText(t('managedResources.sshAccounts.identityChanged'))).toBeInTheDocument()
+    fireEvent.submit(dialog.querySelector('form')!)
+    expect((await fixture.document()).hosts[0]!.username).toBe(original.username)
+    fill(dialog, 'host-password-input', 'RENAMED_DOM_FIXTURE_ONLY')
+    await saveDialog(dialog)
+    const saved = (await fixture.document()).hosts[0]!
+    expect(saved.username).toBe('renamed-fixture')
+    expect(saved.auth.credentialId).not.toBe(original.auth.credentialId)
   })
 
   it('binds temporary credentials to the new id even for identical names and addresses', async () => {

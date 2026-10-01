@@ -5,7 +5,7 @@ import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import { Client as SshClient, type SFTPWrapper } from 'ssh2'
 import type { SshSession } from './sshSessionService.js'
-import { isM4FileName } from '../../../src/features/managed-resources/api/m4IpcContract.js'
+import { isM4FileName, isM4RemoteEntryName } from '../../../src/features/managed-resources/api/m4IpcContract.js'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Module-public types
@@ -40,6 +40,10 @@ export type SftpStatInput = {
   ownerId: string
   generation: number
   absolutePath: string
+}
+
+export type SftpRenameInput = SftpStatInput & {
+  newName: string
 }
 
 export type TransferJobId = string
@@ -308,6 +312,7 @@ export type SftpServiceOptions = {
 export type SftpService = {
   listDirectory: (input: SftpListInput) => Promise<SftpListResult>
   stat: (input: SftpStatInput) => Promise<SftpEntry>
+  rename: (input: SftpRenameInput) => Promise<SftpEntry>
   ensureSftp: (connectionId: string, ownerId: string) => Promise<{ sftp: SFTPWrapper; client: SshClient }>
   dispose: () => void
 }
@@ -409,6 +414,37 @@ export function createSftpService(options: SftpServiceOptions): SftpService {
         sftp.stat(input.absolutePath, (err: any, a: any) => err ? reject(new Error('RESOURCE_NOT_FOUND')) : resolve(a))
       })
       return normalizeEntry(input.absolutePath.split('/').pop() || input.absolutePath, parentOf(input.absolutePath), attrs)
+    },
+    async rename(input) {
+      if (input.absolutePath === '/' || !isM4RemoteEntryName(input.newName)) throw new Error('INVALID_REMOTE_PATH')
+      const session = ensureConnection(input)
+      const sftp = await getClient(session.client, input.ownerId, input.connectionId)
+      const parentPath = parentOf(input.absolutePath)
+      const targetPath = parentPath === '/' ? `/${input.newName}` : `${parentPath}/${input.newName}`
+      const sourceAttrs = await new Promise<any>((resolve, reject) => {
+        sftp.lstat(input.absolutePath, (err: any, attrs: any) => err ? reject(new Error('RESOURCE_NOT_FOUND')) : resolve(attrs))
+      })
+      if (targetPath === input.absolutePath) return normalizeEntry(input.newName, parentPath, sourceAttrs)
+      const targetExists = await new Promise<boolean>((resolve, reject) => {
+        sftp.lstat(targetPath, (err: any) => {
+          if (!err) { resolve(true); return }
+          if (err.code === 2 || err.code === 'ENOENT') { resolve(false); return }
+          reject(new Error(err.code === 3 || err.code === 'EACCES' ? 'PERMISSION_DENIED' : 'SFTP_OPERATION_FAILED'))
+        })
+      })
+      if (targetExists) throw new Error('TARGET_EXISTS')
+      await new Promise<void>((resolve, reject) => {
+        sftp.rename(input.absolutePath, targetPath, (err: any) => {
+          if (!err) { resolve(); return }
+          if (err.code === 3 || err.code === 'EACCES') reject(new Error('PERMISSION_DENIED'))
+          else if (err.code === 2 || err.code === 'ENOENT') reject(new Error('RESOURCE_NOT_FOUND'))
+          else reject(new Error('SFTP_OPERATION_FAILED'))
+        })
+      })
+      const renamedAttrs = await new Promise<any>((resolve, reject) => {
+        sftp.lstat(targetPath, (err: any, attrs: any) => err ? reject(new Error('SFTP_OPERATION_FAILED')) : resolve(attrs))
+      })
+      return normalizeEntry(input.newName, parentPath, renamedAttrs)
     },
     async ensureSftp(connectionId, ownerId) {
       if (!isUuid(connectionId)) throw new Error('UNAUTHORIZED_OWNER')

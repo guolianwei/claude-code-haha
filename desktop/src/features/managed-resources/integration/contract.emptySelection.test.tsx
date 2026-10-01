@@ -374,11 +374,10 @@ describe('M6-A no-selection contract', () => {
       redis: [],
       dataConnection: [],
     })
-    // The picker is present and visibly empty: a zero count, not a missing UI.
-    expect(screen.getByTestId('context-entry-host-count')).toHaveTextContent('0')
-    expect(screen.getByTestId('context-entry-concept-count')).toHaveTextContent('0')
-    expect(screen.getByTestId('context-entry-database-count')).toHaveTextContent('0')
-    expect(screen.getByTestId('context-entry-redis-count')).toHaveTextContent('0')
+    // One visible entry replaces the four fixed-width toolbar buttons.
+    expect(screen.getByTestId('context-entry-total')).toHaveTextContent('0')
+    expect(screen.getByTestId('context-entry-menu')).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByTestId('context-entry-host')).not.toBeInTheDocument()
   }
 
   /**

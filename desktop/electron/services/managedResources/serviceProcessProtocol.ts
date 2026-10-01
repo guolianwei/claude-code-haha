@@ -11,7 +11,7 @@ unreadable=0
 for dir in /proc/[0-9]*; do
   [ -d "$dir" ] || continue
   comm=$(cat "$dir/comm" 2>/dev/null) || { unreadable=$((unreadable+1)); continue; }
-  case "$kind:$comm" in mysql:mysqld|mysql:mariadbd|redis:redis-server|redis:redis-sentinel) ;; *) continue ;; esac
+  case "$kind:$comm" in mysql:mysqld|mysql:mariadbd|redis:redis-server|redis:redis-sentinel|nginx:nginx|keepalived:keepalived|keepalived:keepalive) ;; *) continue ;; esac
   before=$(cat "$dir/stat" 2>/dev/null) || { unreadable=$((unreadable+1)); continue; }
   rest=\${before##*) }; read -r -a fields <<< "$rest"
   start=\${fields[19]}
@@ -45,7 +45,11 @@ export function parseServiceProcesses(text: string, kind: ProcessKind): { proces
     const [, rawPid, startTime, name, encoded] = match
     const pid = Number(rawPid)
     if (!Number.isSafeInteger(pid) || pid > 2147483647 || seen.has(pid)) throw new Error('PROCESS_RESPONSE_INVALID')
-    if (!(kind === 'mysql' ? ['mysqld', 'mariadbd'] : ['redis-server', 'redis-sentinel']).includes(name!)) throw new Error('PROCESS_RESPONSE_INVALID')
+    const allowedNames = kind === 'mysql' ? ['mysqld', 'mariadbd']
+      : kind === 'redis' ? ['redis-server', 'redis-sentinel']
+        : kind === 'nginx' ? ['nginx']
+          : ['keepalived', 'keepalive']
+    if (!allowedNames.includes(name!)) throw new Error('PROCESS_RESPONSE_INVALID')
     const data = Buffer.from(encoded!, 'base64')
     if (data.at(-1) !== 0 || data.toString('base64') !== encoded) throw new Error('PROCESS_RESPONSE_INVALID')
     seen.add(pid)
@@ -69,7 +73,7 @@ identity() {
   rest=\${raw##*) }; read -r -a fields <<< "$rest"
   [ "\${fields[19]}" = "$expected" ] || error PROCESS_CHANGED
   comm=$(cat "/proc/$pid/comm" 2>/dev/null) || error PROCESS_PERMISSION_DENIED
-  case "$kind:$comm" in java:java|java:java.bin|mysql:mysqld|mysql:mariadbd|redis:redis-server|redis:redis-sentinel) ;; *) error PROCESS_CHANGED ;; esac
+  case "$kind:$comm" in java:java|java:java.bin|mysql:mysqld|mysql:mariadbd|redis:redis-server|redis:redis-sentinel|nginx:nginx|keepalived:keepalived|keepalived:keepalive) ;; *) error PROCESS_CHANGED ;; esac
 }
 command -v base64 >/dev/null && command -v tr >/dev/null || error PROCESS_TOOL_UNAVAILABLE
 identity

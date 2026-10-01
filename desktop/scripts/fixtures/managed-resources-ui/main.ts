@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import { createManagedResourcesModule } from '../../../electron/services/managedResources/index'
 import { ELECTRON_IPC_CHANNELS } from '../../../electron/ipc/channels'
 import { createHostWorkspaceFixture } from './hostWorkspaceFixture'
+import { verifySshAccounts } from './sshAccountsFixture'
 
 const sandbox = process.env.M2_SMOKE_SANDBOX!
 const output = process.env.M2_SMOKE_OUTPUT!
@@ -174,6 +175,20 @@ void app.whenReady().then(async () => {
     assert.equal((await snapshot()).selectedHostId, saved.hosts[0]!.id)
     assert.equal((await fs.readFile(module.services.store.filePath, 'utf8')).includes(SENTINEL), false)
     steps.push({ name: stage, status: 'passed' })
+
+    if (process.env.M2_SMOKE_SSH_ACCOUNTS === '1') {
+      stage = 'SSH account maintenance and selected-identity connections'
+      await verifySshAccounts(win, { clickButton, clickExpression, waitFor, type }, module, workspaceFixture, SENTINEL, output)
+      steps.push({ name: stage, status: 'passed' })
+      await fs.writeFile(path.join(output, 'result.json'), JSON.stringify({ status: 'passed', kind: 'isolated-native-ssh-accounts-smoke', platform: process.platform, electron: process.versions.electron, steps, testedAt: new Date().toISOString(), realServicesContacted: false, fakeVault: true }, null, 2) + '\n')
+      await workspaceFixture.close()
+      module.cleanup()
+      clearTimeout(deadline)
+      win.destroy()
+      console.log('SSH_ACCOUNTS_NATIVE_SMOKE passed; stages=' + steps.length)
+      app.quit()
+      return
+    }
 
     stage = 'authentication defaults collapsed with mouse and keyboard disclosure'
     const authToggle = 'document.querySelector("[data-testid=host-authentication-toggle]")'

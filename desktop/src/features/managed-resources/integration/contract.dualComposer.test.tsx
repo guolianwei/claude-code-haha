@@ -353,6 +353,10 @@ describe('M6-A composer context picker', () => {
   })
 
   const openEntry = async (kind: 'host' | 'concept') => {
+    if (!screen.queryByRole('menu', { name: 'Resources' })) {
+      const back = screen.queryByRole('button', { name: 'Back to resources' })
+      fireEvent.click(back ?? screen.getByTestId('context-entry-menu'))
+    }
     fireEvent.click(screen.getByTestId(`context-entry-${kind}`))
     const picker = await screen.findByTestId('context-picker')
     // The catalog arrives through the real host; wait for its options.
@@ -380,8 +384,9 @@ describe('M6-A composer context picker', () => {
     first.unmount()
     render(<EmptySession />)
 
-    // If EmptySession owned a second controller this count would be 0 — the
-    // selection was made in ChatInput.
+    // If EmptySession owned a second controller this count would be 0.
+    // The shared picker can still be open when switching composers.
+    fireEvent.click(screen.queryByRole('button', { name: 'Back to resources' }) ?? screen.getByTestId('context-entry-menu'))
     await waitFor(() => {
       expect(screen.getByTestId('context-entry-host-count')).toHaveTextContent('2')
     })

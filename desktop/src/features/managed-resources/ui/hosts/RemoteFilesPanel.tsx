@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Download, FileText, Folder, RefreshCw, Save, Upload, X } from 'lucide-react'
+import { Download, FileText, Folder, Pencil, RefreshCw, Save, Upload, X } from 'lucide-react'
 
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
 import { SearchField } from '@/components/ui/SearchField'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { Modal } from '@/components/ui/Modal'
 import { RemoteFileEditor } from './RemoteFileEditor'
 import { useTranslation } from '@/i18n'
 import { getDesktopHost } from '@/lib/desktopHost'
@@ -13,6 +14,7 @@ import type {
   ManagedRemoteEditSnapshot,
   ManagedSftpEntry,
 } from '../../api/hostManagementApi'
+import { isM4RemoteEntryName } from '../../api/m4IpcContract'
 import type { Host } from '../../types/resourceTypes'
 import { useRemoteTransfers } from './useRemoteTransfers'
 import { RemoteTransferHeader } from './RemoteTransferHeader'
@@ -27,6 +29,13 @@ type EditorState = {
 type CachedDraft = {
   baseRevision: string
   text: string
+}
+
+type RenameState = {
+  entry: ManagedSftpEntry
+  name: string
+  saving: boolean
+  error: string | null
 }
 
 const dirtyDraftCache = new Map<string, CachedDraft>()
@@ -46,6 +55,11 @@ function formatSize(size: number): string {
   if (size < 1024) return `${size} B`
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`
   return `${(size / (1024 * 1024)).toFixed(1)} MiB`
+}
+
+function formatModifiedTime(mtimeMs: number): string {
+  if (!Number.isFinite(mtimeMs) || mtimeMs <= 0) return '—'
+  return new Date(mtimeMs).toLocaleString()
 }
 
 export function normalizeRemoteDirectory(value: string): string | null {
@@ -78,6 +92,7 @@ export function RemoteFilesPanel({ host }: { host: Host }) {
   const [editor, setEditor] = useState<EditorState | null>(null)
   const [pendingOpen, setPendingOpen] = useState<ManagedSftpEntry | null>(null)
   const [confirmDiscard, setConfirmDiscard] = useState(false)
+  const [rename, setRename] = useState<RenameState | null>(null)
 
   const sortedEntries = useMemo(() => {
     const query = searchQuery.trim().normalize('NFC').toLowerCase()
@@ -96,6 +111,7 @@ export function RemoteFilesPanel({ host }: { host: Host }) {
     setEntries([])
     setError(null)
     setEditor(null)
+    setRename(null)
   }, [host.id, host.initialDirectory])
 
   const loadDirectory = async (absolutePath = currentPath) => {
@@ -230,6 +246,40 @@ export function RemoteFilesPanel({ host }: { host: Host }) {
     if (next) await performOpen(next)
   }
 
+  const beginRename = (entry: ManagedSftpEntry) => {
+    if (editor?.snapshot.edit.absolutePath === entry.absolutePath) {
+      setError(t('managedResources.files.renameCloseEditor'))
+      return
+    }
+    setError(null)
+    setRename({ entry, name: entry.name, saving: false, error: null })
+  }
+
+  const submitRename = async () => {
+    if (!rename || !connectionId || !connected || rename.saving) return
+    if (!isM4RemoteEntryName(rename.name)) {
+      setRename({ ...rename, error: t('managedResources.files.renameInvalid') })
+      return
+    }
+    if (rename.name === rename.entry.name) {
+      setRename(null)
+      return
+    }
+    const active = { ...rename, saving: true, error: null }
+    setRename(active)
+    try {
+      const result = await getDesktopHost().hostManagement.sftpRename(connectionId, generation, rename.entry.absolutePath, rename.name)
+      if (!result.ok) {
+        setRename({ ...active, saving: false, error: `${t('managedResources.files.operationFailed')}: ${result.error.code}` })
+        return
+      }
+      setRename(null)
+      await loadDirectory(currentPath)
+    } catch {
+      setRename({ ...active, saving: false, error: t('managedResources.files.operationFailed') })
+    }
+  }
+
   const transfers = useRemoteTransfers({ hostId: host.id, connectionId, generation, connected, maxConcurrent: 3, onUploaded: () => { void loadDirectory(currentPath) } })
 
   return (
@@ -299,13 +349,15 @@ export function RemoteFilesPanel({ host }: { host: Host }) {
                         </span>
                       </Button>
                       <span className="text-[10px] tabular-nums text-[var(--color-text-tertiary)]">{entry.type === 'file' ? formatSize(entry.size) : ''}</span>
-                      {entry.type === 'directory' && <Button size="xs" variant="ghost" className="col-span-2 justify-self-end" icon={<Download size={11} />} aria-label={`${t('managedResources.transfer.downloadFolder')}: ${entry.name}`} disabled={!transfers.canStart} onClick={() => void transfers.downloadFolder(entry.absolutePath)}>{t('managedResources.transfer.downloadFolder')}</Button>}
-                      {entry.type === 'file' && (
-                        <div className="col-span-2 flex justify-end gap-1">
-                          <Button size="xs" variant="ghost" onClick={() => requestOpen(entry)}>{t('managedResources.files.edit')}</Button>
-                          <Button size="xs" variant="ghost" icon={<Download size={11} />} disabled={!transfers.canStart} onClick={() => void transfers.download(entry.absolutePath, entry.name)}>{t('managedResources.files.download')}</Button>
-                        </div>
-                      )}
+                      <div className="col-span-2 flex min-w-0 items-center gap-1">
+                        <span data-testid="remote-file-modified" className="mr-auto min-w-0 truncate text-[10px] tabular-nums text-[var(--color-text-tertiary)]" title={formatModifiedTime(entry.mtimeMs)}>
+                          {t('managedResources.files.modified')}: {formatModifiedTime(entry.mtimeMs)}
+                        </span>
+                        {entry.type === 'file' && <Button size="xs" variant="ghost" onClick={() => requestOpen(entry)}>{t('managedResources.files.edit')}</Button>}
+                        {(entry.type === 'file' || entry.type === 'directory') && <Button size="xs" variant="ghost" icon={<Pencil size={11} />} disabled={editor?.snapshot.edit.absolutePath === entry.absolutePath} onClick={() => beginRename(entry)}>{t('managedResources.files.rename')}</Button>}
+                        {entry.type === 'directory' && <Button size="xs" variant="ghost" icon={<Download size={11} />} aria-label={`${t('managedResources.transfer.downloadFolder')}: ${entry.name}`} disabled={!transfers.canStart} onClick={() => void transfers.downloadFolder(entry.absolutePath)}>{t('managedResources.transfer.downloadFolder')}</Button>}
+                        {entry.type === 'file' && <Button size="xs" variant="ghost" icon={<Download size={11} />} disabled={!transfers.canStart} onClick={() => void transfers.download(entry.absolutePath, entry.name)}>{t('managedResources.files.download')}</Button>}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -345,6 +397,36 @@ export function RemoteFilesPanel({ host }: { host: Host }) {
       </div>
 
       {error && <div role="alert" className="mt-2 text-xs text-[var(--color-error)]">{error}</div>}
+
+      {rename && (
+        <Modal
+          open
+          onClose={() => { if (!rename.saving) setRename(null) }}
+          closeLabel={t('common.close')}
+          title={t('managedResources.files.renameTitle')}
+          width={440}
+          footer={(
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="secondary" disabled={rename.saving} onClick={() => setRename(null)}>{t('common.cancel')}</Button>
+              <Button type="submit" form="remote-file-rename-form" variant="primary" disabled={rename.saving || rename.name === rename.entry.name}>{t('managedResources.files.rename')}</Button>
+            </div>
+          )}
+        >
+          <form id="remote-file-rename-form" className="space-y-3" onSubmit={event => { event.preventDefault(); void submitRename() }}>
+            <p className="break-all font-mono text-[11px] text-[var(--color-text-tertiary)]">{rename.entry.absolutePath}</p>
+            <Input
+              value={rename.name}
+              maxLength={255}
+              aria-label={t('managedResources.files.renameName')}
+              disabled={rename.saving}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={event => setRename({ ...rename, name: event.currentTarget.value, error: null })}
+            />
+            {rename.error && <p role="alert" className="text-xs text-[var(--color-error)]">{rename.error}</p>}
+          </form>
+        </Modal>
+      )}
 
       <ConfirmDialog
         open={confirmDiscard}

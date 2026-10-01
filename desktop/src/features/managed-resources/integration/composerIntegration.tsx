@@ -26,7 +26,7 @@ export type ComposerTriggerInput = {
 }
 
 export type ComposerContextEntry = {
-  /** The Hosts/Concepts buttons + popover, to place before the model selector. */
+  /** The single resource menu and picker, to place before the model selector. */
   node: ReactNode
   /** Feed every composer text change through this. */
   syncTrigger: (input: ComposerTriggerInput) => void

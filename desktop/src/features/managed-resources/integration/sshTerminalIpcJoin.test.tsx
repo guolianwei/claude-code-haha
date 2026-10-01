@@ -3,6 +3,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import '@testing-library/jest-dom'
 import { StrictMode } from 'react'
 import { generateKeyPairSync } from 'node:crypto'
+import fs from 'node:fs/promises'
+import path from 'node:path'
+import { HostSshAccountSelect } from '../ui/hosts/HostSshAccountSelect'
 import { Server as SshServer } from 'ssh2'
 import { createHostWorkbenchHarness } from '../../../test/hostWorkbenchHarness'
 import { useHostSshStore } from '../stores/hostSshStore'
@@ -47,6 +50,11 @@ const peers = new Set<import('ssh2').Connection>()
 let received: Buffer[]
 let port: number
 let initialPrompt = ''
+let keyboardOnly = false
+let keyboardPrompt = 'Password:'
+let acceptedUsers: string[] = []
+const extraAccountId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+const extraPassword = 'SSH_OPERATOR_FIXTURE_ONLY'
 function output() { return Buffer.concat(terminal.output.map(bytes => Buffer.from(bytes))).toString('utf8') }
 
 beforeEach(async () => {
@@ -54,6 +62,9 @@ beforeEach(async () => {
   terminal.inputs.clear()
   received = []
   initialPrompt = ''
+  keyboardOnly = false
+  keyboardPrompt = 'Password:'
+  acceptedUsers = []
   useSettingsStore.setState({ locale: 'en' })
   useHostSshStore.getState().teardownAll()
   fixture = await createHostWorkbenchHarness()
@@ -63,8 +74,15 @@ beforeEach(async () => {
     client.on('error', () => {})
     client.on('close', () => peers.delete(client))
     client.on('authentication', context => {
-      if (context.method === 'password' && context.username === 'fixture' && context.password === 'SSH_JOIN_FAKE_ONLY') context.accept()
-      else context.reject(['password'])
+      const expected = context.username === 'fixture' ? 'SSH_JOIN_FAKE_ONLY' : context.username === 'operator' ? extraPassword : undefined
+      const acceptPassword = (value: string | undefined) => {
+        if (expected && value === expected) { acceptedUsers.push(context.username); context.accept() }
+        else context.reject(keyboardOnly ? ['keyboard-interactive'] : ['password'])
+      }
+      if (keyboardOnly && context.method === 'keyboard-interactive') {
+        context.prompt([{ prompt: keyboardPrompt, echo: false }], answers => acceptPassword(answers[0]))
+      } else if (!keyboardOnly && context.method === 'password') acceptPassword(context.password)
+      else context.reject(keyboardOnly ? ['keyboard-interactive'] : ['password'])
     })
     client.on('ready', () => client.on('session', accept => {
       const session = accept()
@@ -93,6 +111,90 @@ afterEach(async () => {
 })
 
 describe('SSH terminal DOM -> DesktopHost -> IPC -> loopback', () => {
+  it.each([false, true])('uses the selected account without stale credentials; keyboard-only=%s', async interactive => {
+    keyboardOnly = interactive
+    const created = await fixture.host.hostManagement.saveHost({
+      name: 'Multi-account fixture', address: '127.0.0.1', port, username: 'fixture',
+      auth: { type: 'password', credentialId: null }, tagIds: [], initialDirectory: '/', applications: [], notes: '',
+      credential: { storage: 'vault', secret: { kind: 'ssh-password', password: 'SSH_JOIN_FAKE_ONLY' } },
+      sshAccounts: [{ id: extraAccountId, username: 'operator', auth: { type: 'password', credentialId: null } }],
+      sshAccountCredentials: [{ accountId: extraAccountId, credential: { storage: 'vault', secret: { kind: 'ssh-password', password: extraPassword } } }],
+    })
+    if (!created.ok) throw new Error('Fixture create failed')
+    const host = created.data
+    fixture.services.temporaryCredentials.provide({ ownerId: 'window:99', hostId: host.id, accountId: extraAccountId,
+      payload: { kind: 'ssh-password', password: 'STALE_TEMPORARY_FIXTURE_ONLY' } })
+    const view = render(<><HostSshAccountSelect host={host} /><SshConsole host={host} /></>)
+    fireEvent.change(screen.getByTestId('ssh-account-select'), { target: { value: extraAccountId } })
+    fireEvent.click(screen.getByRole('button', { name: /^connect$/i }))
+    const trust = await screen.findByRole('button', { name: /trust.*continue/i }, { timeout: 6000 })
+    fireEvent.click(trust)
+    await waitFor(() => expect(useHostSshStore.getState().byHostId[host.id]?.status).toBe('ready'), { timeout: 6000 })
+    expect(acceptedUsers).toEqual(['operator'])
+    const editedHost = { ...host, sshAccounts: host.sshAccounts!.map(account => ({ ...account, username: 'renamed-user' })) }
+    view.rerender(<><HostSshAccountSelect host={editedHost} /><SshConsole host={editedHost} /></>)
+    expect((screen.getByTestId('ssh-account-select') as HTMLSelectElement).selectedOptions[0]!.textContent).toBe('operator')
+    view.rerender(<><HostSshAccountSelect host={host} /><SshConsole host={host} /></>)
+    expect(screen.getByTestId('ssh-account-select')).toBeDisabled()
+    expect(useHostSshStore.getState().selectAccount(host, host.id)).toBe(false)
+    const firstConnection = useHostSshStore.getState().byHostId[host.id]!.connectionId
+    fireEvent.click(screen.getByRole('button', { name: /^disconnect$/i }))
+    await waitFor(() => expect(screen.getByTestId('ssh-account-select')).toBeEnabled())
+    fireEvent.change(screen.getByTestId('ssh-account-select'), { target: { value: host.id } })
+    fireEvent.click(screen.getByRole('button', { name: /^connect$/i }))
+    await waitFor(() => expect(useHostSshStore.getState().byHostId[host.id]?.status).toBe('ready'), { timeout: 6000 })
+    expect(acceptedUsers).toEqual(['operator', 'fixture'])
+    expect(useHostSshStore.getState().byHostId[host.id]!.connectionId).not.toBe(firstConnection)
+    const logs = await fs.readFile(path.join(fixture.tempDir, 'cc-haha', 'diagnostics', 'ssh-connections.log'), 'utf8')
+    expect(logs).toContain('[managed-ssh]')
+    expect(logs).toContain('"username":"operator"')
+    expect(logs).toContain('"credentialSource":"vault"')
+    expect(logs).toContain('"phase":"ready"')
+    if (interactive) expect(logs).toContain('"phase":"keyboard-interactive"')
+    for (const secret of [extraPassword, 'SSH_JOIN_FAKE_ONLY', 'STALE_TEMPORARY_FIXTURE_ONLY']) expect(logs).not.toContain(secret)
+  }, 20000)
+
+  it.each([false, true])('reports an authentication failure without logging secrets; interactive-challenge=%s', async interactive => {
+    keyboardOnly = interactive
+    keyboardPrompt = 'Verification code:'
+    const created = await fixture.host.hostManagement.saveHost({
+      name: 'Failure fixture', address: '127.0.0.1', port, username: 'fixture',
+      auth: { type: 'password', credentialId: null }, tagIds: [], initialDirectory: '/', applications: [], notes: '',
+      credential: { storage: 'vault', secret: { kind: 'ssh-password', password: 'WRONG_PASSWORD_FIXTURE_ONLY' } },
+    })
+    if (!created.ok) throw new Error('Fixture create failed')
+    const host = created.data
+    await useHostSshStore.getState().start(host, 80, 24)
+    await waitFor(() => expect(useHostSshStore.getState().byHostId[host.id]?.challenge).toBeTruthy(), { timeout: 6000 })
+    await useHostSshStore.getState().answer(host.id, 'trust')
+    const expected = interactive ? 'SSH_INTERACTIVE_AUTH_REQUIRED' : 'AUTH_FAILED'
+    await waitFor(() => expect(useHostSshStore.getState().byHostId[host.id]?.lastError).toBe(expected), { timeout: 6000 })
+    expect(acceptedUsers).toEqual([])
+    const logs = await fs.readFile(path.join(fixture.tempDir, 'cc-haha', 'diagnostics', 'ssh-connections.log'), 'utf8')
+    expect(logs).toContain(expected)
+    expect(logs).not.toContain('WRONG_PASSWORD_FIXTURE_ONLY')
+    expect(logs).not.toContain('Verification code:')
+  }, 15000)
+
+  it('cancels a pending allocation without starting a late SSH connection', async () => {
+    const created = await fixture.host.hostManagement.saveHost({
+      name: 'Cancelled allocation fixture', address: '127.0.0.1', port, username: 'fixture',
+      auth: { type: 'password', credentialId: null }, tagIds: [], initialDirectory: '/', applications: [], notes: '',
+      credential: { storage: 'temporary', secret: { kind: 'ssh-password', password: 'SSH_JOIN_FAKE_ONLY' } },
+    })
+    if (!created.ok) throw new Error('Fixture create failed')
+    const host = created.data
+    const release = fixture.holdNextSave(ELECTRON_IPC_CHANNELS.mrCreateConnection)
+    const pending = useHostSshStore.getState().start(host, 80, 24)
+    await waitFor(() => expect(fixture.calls).toContain(ELECTRON_IPC_CHANNELS.mrCreateConnection))
+    await useHostSshStore.getState().disconnect(host.id)
+    release()
+    await pending
+    expect(fixture.calls).not.toContain(ELECTRON_IPC_CHANNELS.mrStartConnection)
+    expect(useHostSshStore.getState().byHostId[host.id]).toMatchObject({ status: 'closed', connectionId: null })
+    expect(peers.size).toBe(0)
+  })
+
   it('replays the actual initial prompt when the console mounts late or reopens, without sending Enter', async () => {
     initialPrompt = 'fixture@loopback:~$ '
     const created = await fixture.host.hostManagement.saveHost({

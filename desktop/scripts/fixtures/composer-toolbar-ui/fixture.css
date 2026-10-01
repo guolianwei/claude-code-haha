@@ -1,0 +1,4 @@
+@import '../../../src/theme/globals.css';
+/* Vite runs with this fixture as its root. Include the real app's classes so
+   geometry assertions exercise the same Tailwind utilities as the product. */
+@source '../../../src';

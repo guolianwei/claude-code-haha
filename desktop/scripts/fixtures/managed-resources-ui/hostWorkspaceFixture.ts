@@ -14,7 +14,7 @@ import { createFakeSftpTransport } from '../../../electron/services/managedResou
 import { createSftpService, createRemoteEditService, createTransferService } from '../../../electron/services/managedResources/sftpService'
 import { seedRemoteEditors, verifyRemoteEditors } from './remoteEditorsFixture'
 
-type Controls = {
+export type Controls = {
   clickButton: (key: string, selector?: string, scope?: string) => Promise<void>
   clickExpression: (expression: string) => Promise<void>
   waitFor: (expression: string, label: string, timeout?: number) => Promise<void>
@@ -25,6 +25,7 @@ type Controls = {
 // only the SFTP driver replaced by a filesystem inside an isolated temp dir.
 export async function createHostWorkspaceFixture(module: ManagedResourcesModule, sandbox: string, password: string, directorySelections: string[] = []) {
   const peers = new Set<Connection>()
+  const authenticatedUsernames: string[] = []
   const input: Buffer[] = []
   const scriptCommands: string[] = []
   const key = generateKeyPairSync('rsa', {
@@ -37,8 +38,11 @@ export async function createHostWorkspaceFixture(module: ManagedResourcesModule,
     client.on('error', () => {})
     client.on('close', () => peers.delete(client))
     client.on('authentication', context => {
-      if (context.method === 'password' && context.username === 'fixture' && context.password === password) context.accept()
-      else context.reject(['password'])
+      const expected = context.username === 'fixture' ? password : context.username === 'operator' ? `${password}-operator` : null
+      if (context.method === 'password' && expected !== null && context.password === expected) {
+        authenticatedUsernames.push(context.username)
+        context.accept()
+      } else context.reject(['password'])
     })
     client.on('ready', () => client.on('session', accept => {
       const session = accept()
@@ -93,6 +97,7 @@ export async function createHostWorkspaceFixture(module: ManagedResourcesModule,
 
   return {
     port,
+    get authenticatedUsernames() { return [...authenticatedUsernames] },
     async verify(win: BrowserWindow, controls: Controls, output: string) {
       const { clickButton, clickExpression, waitFor, type } = controls
       const summaryLayout = await win.webContents.executeJavaScript(`(() => {

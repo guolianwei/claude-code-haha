@@ -257,6 +257,7 @@ describe('resourceDocumentAtomicWriter', () => {
               type: 'password',
               credentialId: null,
             },
+            sshAccounts: [],
             tagIds: [],
             initialDirectory: '/var/log',
             applications: [],

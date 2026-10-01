@@ -110,6 +110,7 @@ void app.whenReady().then(async () => {
     steps.push(stage)
 
     stage = 'no-password DOM selection -> main prepare -> staging -> WS -> SDK'
+    await click(byId('context-entry-menu'))
     await click(byId('context-entry-host'))
     await click(byId(`context-option-resource-${host.id}`))
     await button('managedResources.context.close')
@@ -126,6 +127,7 @@ void app.whenReady().then(async () => {
     steps.push(stage)
 
     stage = 'password checkbox -> vault -> SDK without renderer/manifest/history/trace copies'
+    await click(byId('context-entry-menu'))
     await click(byId('context-entry-host'))
     await click(byId('context-include-passwords'))
     await button('managedResources.context.close')

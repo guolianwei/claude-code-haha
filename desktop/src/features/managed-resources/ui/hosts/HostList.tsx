@@ -1,18 +1,41 @@
 import { useState } from 'react'
-import { Plus, Tag as TagIcon, ArrowDownUp, RefreshCw, ChevronDown, ChevronRight, Server, Layers } from 'lucide-react'
+import { Plus, Tag as TagIcon, ArrowDownUp, RefreshCw, ChevronDown, ChevronRight, Server, Layers, Cable } from 'lucide-react'
 import { useHostManagementStore } from '../../stores/hostManagementStore'
 import { useTranslation } from '../../../../i18n'
 import { SearchField } from '../../../../components/ui/SearchField'
 import { IconButton } from '../../../../components/ui/IconButton'
 import { Button } from '../../../../components/ui/Button'
 import type { Host } from '../../types/resourceTypes'
+import { HostSshAccountSelect } from './HostSshAccountSelect'
+import { findHostSshAccount } from '../../types/hostSshAccounts'
+import { isHostSshBusy, useHostSshStore } from '../../stores/hostSshStore'
 
 export type HostListProps = {
   onOpenTagModal?: () => void
   onOpenImportExport?: () => void
+  onRequestTerminal?: (hostId: string) => void
 }
 
-export function HostList({ onOpenTagModal, onOpenImportExport }: HostListProps) {
+function HostCardSshControls({ host, onSelectHost, onRequestTerminal }: { host: Host; onSelectHost: (hostId: string) => void; onRequestTerminal?: (hostId: string) => void }) {
+  const t = useTranslation()
+  const entry = useHostSshStore(state => state.byHostId[host.id])
+  const selectedAccountId = useHostSshStore(state => state.selectedAccountByHostId[host.id]) ?? host.id
+  const busy = isHostSshBusy(entry)
+  const canConnect = !busy && !!findHostSshAccount(host, selectedAccountId)
+  const connect = () => {
+    onSelectHost(host.id)
+    onRequestTerminal?.(host.id)
+    void useHostSshStore.getState().start(host, 80, 24)
+  }
+  return <div className="mt-1 flex min-w-0 items-center justify-end gap-1.5 pt-1" onClick={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()}>
+    <HostSshAccountSelect host={host} compact />
+    <Button size="xs" variant="secondary" disabled={!canConnect} onClick={connect} icon={<Cable size={12} />}>
+      {t('managedResources.ssh.connect') || '连接'}
+    </Button>
+  </div>
+}
+
+export function HostList({ onOpenTagModal, onOpenImportExport, onRequestTerminal }: HostListProps) {
   const t = useTranslation()
   const {
     hosts: allHosts,
@@ -88,6 +111,7 @@ export function HostList({ onOpenTagModal, onOpenImportExport }: HostListProps) 
             ))}
           </div>
         )}
+        <HostCardSshControls host={host} onSelectHost={setSelectedHostId} onRequestTerminal={onRequestTerminal} />
       </div>
     )
   }

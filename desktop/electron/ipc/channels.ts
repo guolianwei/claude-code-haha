@@ -136,6 +136,7 @@ export const ELECTRON_IPC_CHANNELS = {
   mrRevokeLocalToken: 'desktop:managed-resources:revoke-local-token',
   mrSftpList: 'desktop:managed-resources:sftp-list',
   mrSftpStat: 'desktop:managed-resources:sftp-stat',
+  mrSftpRename: 'desktop:managed-resources:sftp-rename',
   mrTransferStartDownload: 'desktop:managed-resources:transfer-start-download',
   mrTransferStartUpload: 'desktop:managed-resources:transfer-start-upload',
   mrTransferUploadFolder: 'desktop:managed-resources:transfer-upload-folder',

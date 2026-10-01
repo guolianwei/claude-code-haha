@@ -1,8 +1,9 @@
 import type { CredentialKind, ResourceDocument, Host } from '../../../../src/features/managed-resources/types/resourceTypes.js'
 import { CredentialRecordSchema } from '../../../../src/features/managed-resources/types/resourceSchemas.js'
-import type { HostCredentialWrite } from '../../../../src/features/managed-resources/api/credentialMutationContract.js'
+import type { HostCredentialWrite, SshAccountCredentialWrite } from '../../../../src/features/managed-resources/api/credentialMutationContract.js'
 import type { CredentialVault, TemporaryCredentialStore } from '../vault/credentialVault.js'
 import { findResourceReferences } from './resourceDocumentIntegrity.js'
+import { getHostSshAccounts } from '../../../../src/features/managed-resources/types/hostSshAccounts.js'
 
 export class CredentialMutationError extends Error {
   constructor(readonly code: 'VAULT_UNAVAILABLE' | 'INVALID_CREDENTIAL_PAYLOAD' | 'INVALID_TEMPORARY_CREDENTIAL') {
@@ -43,26 +44,71 @@ export function applyHostCredential(
   write: HostCredentialWrite | undefined,
   dependencies: CredentialMutationDependencies,
   afterCommit: Array<() => void>,
+  accountId = host.id,
 ): Host {
   if (!write) return host
   const kind = host.auth.type === 'password' ? 'ssh-password' : 'ssh-private-key'
   if (write.secret.kind !== kind) throw new CredentialMutationError('INVALID_CREDENTIAL_PAYLOAD')
   if (write.storage === 'vault') {
-    return { ...host, auth: { ...host.auth, credentialId: createBoundCredential(draft, dependencies.vault, kind, write.secret, host.name) } }
+    const credentialId = createBoundCredential(draft, dependencies.vault, kind, write.secret, `${host.name} (${host.username})`)
+    afterCommit.push(() => dependencies.temporaryCredentials?.clearAccount({ hostId: host.id, accountId }))
+    return { ...host, auth: { ...host.auth, credentialId } }
   }
   const prepared = dependencies.temporaryCredentials?.prepare({
-    ownerId: dependencies.ownerId ?? '', hostId: host.id, payload: write.secret,
+    ownerId: dependencies.ownerId ?? '', hostId: host.id, accountId, payload: write.secret,
   })
   if (!prepared || prepared.status !== 'prepared') throw new CredentialMutationError('INVALID_TEMPORARY_CREDENTIAL')
   // Unpublished secrets are discarded on validation/write failure.
-  afterCommit.push(prepared.publish)
+  afterCommit.push(() => {
+    dependencies.temporaryCredentials?.clearAccount({ hostId: host.id, accountId })
+    prepared.publish()
+  })
   return { ...host, auth: { ...host.auth, credentialId: null } }
+}
+
+/** Apply all account writes in the same transaction; secrets never enter Host DTOs. */
+export function applyHostCredentials(
+  draft: ResourceDocument,
+  host: Host,
+  write: HostCredentialWrite | undefined,
+  accountWrites: SshAccountCredentialWrite[] | undefined,
+  dependencies: CredentialMutationDependencies,
+  afterCommit: Array<() => void>,
+  previous?: Host,
+): Host {
+  const previousAccounts = new Map(previous ? getHostSshAccounts(previous).map(account => [account.id, account]) : [])
+  const writes = new Map<string, HostCredentialWrite>()
+  for (const item of accountWrites ?? []) {
+    if (writes.has(item.accountId) || !(host.sshAccounts ?? []).some(account => account.id === item.accountId)) {
+      throw new CredentialMutationError('INVALID_CREDENTIAL_PAYLOAD')
+    }
+    writes.set(item.accountId, item.credential)
+  }
+  const accounts = getHostSshAccounts(host).map(account => {
+    const old = previousAccounts.get(account.id)
+    const replacement = account.id === host.id ? write : writes.get(account.id)
+    if (old && (old.username !== account.username || old.auth.type !== account.auth.type) && !replacement) {
+      throw new CredentialMutationError('INVALID_CREDENTIAL_PAYLOAD')
+    }
+    const auth = applyHostCredential(draft, {
+      ...host, username: account.username, auth: { ...old?.auth, ...account.auth },
+    }, replacement, dependencies, afterCommit, account.id).auth
+    return { ...old, ...account, auth }
+  })
+  for (const old of previousAccounts.values()) {
+    if (!accounts.some(account => account.id === old.id)) {
+      afterCommit.push(() => dependencies.temporaryCredentials?.clearAccount({ hostId: host.id, accountId: old.id }))
+    }
+  }
+  return { ...host, auth: accounts[0]!.auth, sshAccounts: accounts.slice(1) }
 }
 
 export function resourceCredentialIds(document: ResourceDocument): Set<string> {
   const ids = new Set<string>()
   for (const host of document.hosts) {
-    if (host.auth.credentialId) ids.add(host.auth.credentialId)
+    for (const account of getHostSshAccounts(host)) {
+      if (account.auth.credentialId) ids.add(account.auth.credentialId)
+    }
     for (const app of host.applications) for (const account of app.accounts) {
       if (account.credentialId) ids.add(account.credentialId)
     }

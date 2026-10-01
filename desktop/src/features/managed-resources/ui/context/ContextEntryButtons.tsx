@@ -1,6 +1,6 @@
 /**
- * M6-A picker surface: the side-by-side "Hosts" / "Concepts" entry buttons that
- * sit before the model selector in both composers, plus the popover they open.
+ * One compact resource entry for both composers. Its dropdown first selects a
+ * category, then shows the existing multi-select picker without changing picks.
  *
  * Every entry has a real accessible name (`Button` `aria-label` /
  * `Checkbox` label / `IconButton` `label`), and the popover is deliberately NOT
@@ -8,11 +8,15 @@
  * filtering as the user types and Enter confirms the highlighted option without
  * ever reaching the send path.
  */
-import { useMemo } from 'react'
-import { X } from 'lucide-react'
-import { Button } from '../../../../components/ui/Button'
-import { Checkbox } from '../../../../components/ui/Checkbox'
-import { IconButton } from '../../../../components/ui/IconButton'
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode, type RefObject } from 'react'
+import { createPortal } from 'react-dom'
+import { ArrowLeft, ChevronDown, ChevronRight, Database, Layers, Server, Shapes, X } from 'lucide-react'
+import { Button } from '@/components/ui/Button'
+import { Checkbox } from '@/components/ui/Checkbox'
+import { IconButton } from '@/components/ui/IconButton'
+import { SearchField } from '@/components/ui/SearchField'
+import { useAnchoredPosition } from '@/hooks/useAnchoredPosition'
+import { useDismissable } from '@/hooks/useDismissable'
 import { useTranslation } from '../../../../i18n'
 import {
   deriveResolvedIds,
@@ -48,6 +52,17 @@ export function ContextEntryButtons({ compact = false }: ContextEntryButtonsProp
   const removeDirectId = useContextSelectionStore((s) => s.removeDirectId)
   const includePasswords = useContextSelectionStore((s) => s.includePasswords)
   const setIncludePasswords = useContextSelectionStore((s) => s.setIncludePasswords)
+  const setPickerFilter = useContextSelectionStore((s) => s.setPickerFilter)
+  const scope = useContextSelectionStore((s) => `${s.scope}:${s.sessionId ?? ''}`)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [focusPicker, setFocusPicker] = useState(false)
+  const anchorRef = useRef<HTMLButtonElement>(null)
+  const popupId = useId()
+  const pickerOpen = Boolean(pickerKind || unavailableCommand)
+  const close = useCallback(() => { setMenuOpen(false); setFocusPicker(false); closePicker() }, [closePicker])
+  const closeAndFocus = () => { close(); anchorRef.current?.focus() }
+  useEffect(() => { setMenuOpen(false) }, [scope])
+  useEffect(() => { if (pickerOpen) setMenuOpen(false) }, [pickerOpen])
 
   // Recomputed on every change, never read from a stored id set.
   const resolved = useMemo(() => deriveResolvedIds(pick, catalog), [pick, catalog])
@@ -123,48 +138,61 @@ export function ContextEntryButtons({ compact = false }: ContextEntryButtonsProp
           ? t('managedResources.context.redisTitle')
           : t('managedResources.context.unavailableTitle')
 
-  return (
-    <div className="relative flex shrink-0 items-center gap-1" data-testid="context-entry-buttons">
-      {entries.map(({ kind, label, count }) => {
-        const isOpen = pickerKind === kind
-        return (
-          <Button
-            key={kind}
-            size={compact ? 'sm' : 'base'}
-            variant={isOpen || count > 0 ? 'tonal' : 'secondary'}
-            aria-haspopup="dialog"
-            aria-expanded={isOpen}
-            aria-label={t('managedResources.context.entryLabel', { name: label, count })}
-            data-testid={`context-entry-${kind}`}
-            data-count={count}
-            onClick={() => (isOpen ? closePicker() : openPicker(kind))}
-          >
-            <span>{label}</span>
-            <span aria-hidden="true" className="tabular-nums opacity-70" data-testid={`context-entry-${kind}-count`}>
-              {count}
-            </span>
-          </Button>
-        )
-      })}
+  const total = entries.reduce((sum, entry) => sum + entry.count, 0)
+  const resourceLabel = t('managedResources.context.menu')
+  const entryIcons = { host: Server, concept: Shapes, database: Database, redis: Layers }
 
-      {(pickerKind || unavailableCommand) && (
-        <div
-          role="dialog"
-          aria-label={popoverTitle}
-          data-testid="context-picker"
-          data-filter={pickerFilter}
-          className="absolute bottom-full left-0 z-[60] mb-2 max-h-80 w-72 overflow-y-auto rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-3 shadow-[var(--shadow-lg)]"
-        >
+  return (
+    <div className="relative shrink-0" data-testid="context-entry-buttons">
+      <Button ref={anchorRef} size={compact ? 'sm' : 'base'}
+        variant={menuOpen || pickerOpen || total > 0 ? 'tonal' : 'secondary'}
+        aria-haspopup={pickerOpen ? 'dialog' : 'menu'} aria-expanded={menuOpen || pickerOpen}
+        aria-controls={menuOpen || pickerOpen ? popupId : undefined}
+        aria-label={t('managedResources.context.entryLabel', { name: resourceLabel, count: total })}
+        title={entries.map(entry => `${entry.label}: ${entry.count}`).join(' · ')}
+        data-testid="context-entry-menu" data-count={total}
+        onClick={() => menuOpen || pickerOpen ? close() : setMenuOpen(true)}
+        onKeyDown={event => {
+          if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault(); event.stopPropagation(); closePicker(); setMenuOpen(true)
+          }
+        }}>
+        <span>{resourceLabel}</span>
+        <span aria-hidden="true" className="tabular-nums opacity-70" data-testid="context-entry-total">{total}</span>
+        <ChevronDown size={12} aria-hidden="true" />
+      </Button>
+
+      {menuOpen && !pickerOpen && <ContextPopover key="categories" anchorRef={anchorRef}
+        id={popupId} role="menu" label={resourceLabel} onClose={close} autoFocusMenu>
+        {entries.map(({ kind, label, count }) => {
+          const Icon = entryIcons[kind]
+          return <button key={kind} type="button" role="menuitem"
+            aria-label={t('managedResources.context.entryLabel', { name: label, count })}
+            data-testid={`context-entry-${kind}`} data-count={count}
+            className="flex w-full items-center gap-2 rounded-[var(--radius-md)] px-2 py-2 text-left text-sm text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-border-focus)]"
+            onClick={() => { setMenuOpen(false); setFocusPicker(true); openPicker(kind) }}>
+            <Icon size={15} aria-hidden="true" />
+            <span className="flex-1">{label}</span>
+            <span aria-hidden="true" className="tabular-nums text-[var(--color-text-secondary)]" data-testid={`context-entry-${kind}-count`}>{count}</span>
+            <ChevronRight size={12} aria-hidden="true" />
+          </button>
+        })}
+      </ContextPopover>}
+
+      {pickerOpen && (
+        <ContextPopover key={pickerKind ?? 'unavailable'} anchorRef={anchorRef}
+          id={popupId} role="dialog" label={popoverTitle} onClose={close} autoFocusSearch={focusPicker}>
+          <div data-testid="context-picker" data-filter={pickerFilter}>
           <div className="mb-2 flex items-center justify-between gap-2">
-            <span className="text-sm font-medium text-[var(--color-text-primary)]">{popoverTitle}</span>
-            <IconButton
-              icon={<X size={14} strokeWidth={2} />}
-              label={t('managedResources.context.close')}
-              size="xs"
-              tone="muted"
-              onClick={() => closePicker()}
-            />
+            <IconButton icon={<ArrowLeft size={14} />} label={t('managedResources.context.backToMenu')}
+              size="xs" tone="muted" onClick={() => { closePicker(); setMenuOpen(true) }} />
+            <span className="flex-1 text-sm font-medium text-[var(--color-text-primary)]">{popoverTitle}</span>
+            <IconButton icon={<X size={14} strokeWidth={2} />} label={t('managedResources.context.close')}
+              size="xs" tone="muted" onClick={closeAndFocus} />
           </div>
+          {!unavailableCommand && <SearchField value={pickerFilter} onChange={setPickerFilter}
+            label={t('managedResources.context.search')} placeholder={t('managedResources.context.search')}
+            clearLabel={t('managedResources.context.clearSearch')} size="md" className="mb-3" />}
 
           {unavailableCommand ? (
             <div data-testid="context-picker-unavailable" role="status" className="space-y-1">
@@ -188,10 +216,58 @@ export function ContextEntryButtons({ compact = false }: ContextEntryButtonsProp
               onIncludePasswordsChange={setIncludePasswords}
             />
           )}
-        </div>
+          </div>
+        </ContextPopover>
       )}
     </div>
   )
+}
+
+/** Category actions lead to a multi-select dialog, unlike the single-select Dropdown.
+ * Reuse the shared positioning/dismissal hooks and portal outside the clipped composer.
+ * Slash-triggered dialogs do not grab focus from the editor.
+ */
+function ContextPopover({ anchorRef, id, role, label, onClose, autoFocusMenu = false, autoFocusSearch = false, children }: {
+  anchorRef: RefObject<HTMLButtonElement | null>
+  id: string
+  role: 'menu' | 'dialog'
+  label: string
+  onClose: () => void
+  autoFocusMenu?: boolean
+  autoFocusSearch?: boolean
+  children: ReactNode
+}) {
+  const floatingRef = useRef<HTMLDivElement>(null)
+  const position = useAnchoredPosition({ open: true, anchorRef, floatingRef,
+    placement: 'top-end', offset: 8, viewportMargin: 12, clampHeight: true })
+  useDismissable({ open: true, refs: [floatingRef], triggerRef: anchorRef,
+    stopEscapePropagation: true, closeOnViewportChange: true,
+    onDismiss: reason => {
+      const ownedFocus = floatingRef.current?.contains(document.activeElement)
+      onClose()
+      if (reason === 'escape' && ownedFocus) anchorRef.current?.focus()
+    },
+  })
+  useEffect(() => {
+    if (autoFocusMenu) floatingRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+    else if (autoFocusSearch) floatingRef.current?.querySelector<HTMLInputElement>('input[type="search"], input[type="text"]')?.focus()
+  }, [autoFocusMenu, autoFocusSearch])
+  return createPortal(<div ref={floatingRef} id={id} role={role} aria-label={label}
+    className="fixed z-[var(--z-dropdown)] overflow-y-auto rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface)] p-3 shadow-[var(--shadow-dropdown)]"
+    style={{ ...position.style, width: 'min(320px, calc(100vw - 24px))', maxHeight: Math.min(384, Number(position.style.maxHeight ?? 384)) }}
+    onKeyDown={event => {
+      // A key inside either popup must never bubble into the composer's send handler.
+      event.stopPropagation()
+      if (role !== 'menu') return
+      const items = Array.from(floatingRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+      const index = items.indexOf(document.activeElement as HTMLElement)
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+        : event.key === 'ArrowDown' ? (index + 1) % items.length
+          : event.key === 'ArrowUp' ? (index - 1 + items.length) % items.length : -1
+      if (next >= 0) { event.preventDefault(); items[next]?.focus() }
+    }}>
+    {children}
+  </div>, document.body)
 }
 
 type ContextPickerBodyProps = {

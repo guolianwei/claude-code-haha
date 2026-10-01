@@ -15,7 +15,16 @@ let replies: Map<string, { text: string; exitCode?: number; hold?: boolean }>
 const identity = { pid: 231, startTime: '123456' }
 const probeCommand = (processKind: ProcessKind, probe: ProcessProbe) => processInspectionCommand({ ...identity, processKind, probe })
 const inspectionFrame = (probe: ProcessProbe, value: string) => `CC_HAHA_INSPECTION_V1\t231\t${probe}\n${Buffer.from(value).toString('base64')}\nCC_HAHA_INSPECTION_END\n`
-const frame = (kind: 'mysql' | 'redis') => `CC_HAHA_PROCESS_V1\t${kind}\n231\t123456\t${kind === 'mysql' ? 'mysqld' : 'redis-server'}\t${Buffer.from((kind === 'mysql' ? '/usr/sbin/mysqld\0--port=3337\0' : 'redis-server 127.0.0.1:6379\0')).toString('base64')}\nCC_HAHA_PROCESS_END\t0\n`
+const serviceFixtures = {
+  mysql: { name: 'mysqld', command: '/usr/sbin/mysqld\0--port=3337\0' },
+  redis: { name: 'redis-server', command: 'redis-server 127.0.0.1:6379\0' },
+  nginx: { name: 'nginx', command: 'nginx\0-g\0daemon off;\0' },
+  keepalived: { name: 'keepalived', command: '/usr/sbin/keepalived\0-D\0' },
+} as const
+const frame = (kind: keyof typeof serviceFixtures) => {
+  const fixture = serviceFixtures[kind]
+  return `CC_HAHA_PROCESS_V1\t${kind}\n231\t123456\t${fixture.name}\t${Buffer.from(fixture.command).toString('base64')}\nCC_HAHA_PROCESS_END\t0\n`
+}
 const api = () => h.fixture.host.hostManagement
 const request = (processKind: ProcessKind = 'mysql', probe: ProcessProbe = 'top') => ({ action: 'inspectProcess' as const, ...identity, processKind, probe,
   hostId: h.host.id, connectionId: h.ssh().connectionId!, generation: h.ssh().generation, requestId: randomUUID() })
@@ -23,8 +32,8 @@ beforeEach(async () => {
   vi.stubGlobal('matchMedia', (query: string) => ({ matches: false, media: query, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }))
   useSettingsStore.setState({ locale: 'en' })
   replies = new Map()
-  for (const kind of ['mysql', 'redis'] as const) replies.set(processListCommand(kind), { text: frame(kind) })
-  for (const kind of ['java', 'mysql', 'redis'] as const) for (const probe of ['top', 'ports', 'connections'] as const) {
+  for (const kind of ['mysql', 'redis', 'nginx', 'keepalived'] as const) replies.set(processListCommand(kind), { text: frame(kind) })
+  for (const kind of ['java', 'mysql', 'redis', 'nginx', 'keepalived'] as const) for (const probe of ['top', 'ports', 'connections'] as const) {
     replies.set(probeCommand(kind, probe), { text: inspectionFrame(probe, probe === 'top' ? 'PID USER %CPU %MEM RES\n231 fixture 12.5 2.0 128m\n'
       : probe === 'ports' ? 'tcp LISTEN 0 128 [::]:3337 [::]:* users:(("service",pid=231,fd=9))\n'
       : 'tcp ESTAB 0 0 127.0.0.1:3337 127.0.0.1:54321 users:(("service",pid=231,fd=12))\n') })
@@ -35,7 +44,7 @@ beforeEach(async () => {
 afterEach(async () => { cleanup(); await h?.dispose(); vi.unstubAllGlobals() })
 
 describe('process discovery through real HostDetail -> DesktopHost -> IPC -> loopback SSH', () => {
-  it.each(['mysql', 'redis'] as const)('exposes %s entry and all three read-only inspections through real buttons and keyboard tabs', async kind => {
+  it.each(['mysql', 'redis', 'nginx', 'keepalived'] as const)('exposes %s entry and all three read-only inspections through real buttons and keyboard tabs', async kind => {
     render(<HostDetail />)
     fireEvent.click(screen.getByTestId(`host-${kind}-tab`))
     const row = await screen.findByRole('button', { name: 'Ports: 231' })

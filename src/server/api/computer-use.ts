@@ -126,6 +126,7 @@ async function runCommand(
 ): Promise<{ ok: boolean; stdout: string; stderr: string; code: number }> {
   try {
     const proc = Bun.spawn([cmd, ...args], {
+      windowsHide: true,
       stdout: 'pipe',
       stderr: 'pipe',
       env: getPythonCommandEnv(),

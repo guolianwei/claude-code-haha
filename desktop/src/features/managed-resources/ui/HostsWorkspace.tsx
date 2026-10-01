@@ -23,6 +23,7 @@ export function HostsWorkspace() {
 
   const [isTagModalOpen, setIsTagModalOpen] = useState(false)
   const [isImportExportOpen, setIsImportExportOpen] = useState(false)
+  const [terminalRequest, setTerminalRequest] = useState<{ hostId: string; requestId: number } | null>(null)
 
   useEffect(() => {
     fetchCapabilities()
@@ -41,10 +42,11 @@ export function HostsWorkspace() {
       ) : (
         <div className="flex min-h-0 flex-1 overflow-hidden">
           <div className="flex w-80 flex-shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface-sidebar)]">
-            <HostList onOpenTagModal={() => setIsTagModalOpen(true)} onOpenImportExport={() => setIsImportExportOpen(true)} />
+            <HostList onOpenTagModal={() => setIsTagModalOpen(true)} onOpenImportExport={() => setIsImportExportOpen(true)}
+              onRequestTerminal={hostId => setTerminalRequest(previous => ({ hostId, requestId: (previous?.requestId ?? 0) + 1 }))} />
           </div>
           <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--color-surface)]" data-testid="host-detail-shell">
-            <HostDetail onOpenTagModal={() => setIsTagModalOpen(true)} onOpenImportExport={() => setIsImportExportOpen(true)} />
+            <HostDetail terminalRequest={terminalRequest} onOpenTagModal={() => setIsTagModalOpen(true)} onOpenImportExport={() => setIsImportExportOpen(true)} />
           </div>
         </div>
       )}

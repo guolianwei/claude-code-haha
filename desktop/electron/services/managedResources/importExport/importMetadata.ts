@@ -197,8 +197,13 @@ export async function executeImportMetadata(
           ...host,
           auth: {
             ...host.auth,
-            credentialId: existingHostAuthCreds.get(host.id) ?? null,
+            credentialId: existing?.username === host.username && existing.auth.type === host.auth.type
+              ? existingHostAuthCreds.get(host.id) ?? null : null,
           },
+          sshAccounts: host.sshAccounts.map(account => {
+            const old = existing?.sshAccounts?.find(candidate => candidate.id === account.id && candidate.username === account.username && candidate.auth.type === account.auth.type)
+            return { ...old, ...account, auth: { ...old?.auth, ...account.auth, credentialId: old?.auth.credentialId ?? null } }
+          }),
           applications: host.applications.map(app => ({
             ...app,
             accounts: app.accounts.map(acc => ({

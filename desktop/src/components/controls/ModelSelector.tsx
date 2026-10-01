@@ -853,6 +853,8 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
       <div
         ref={dropdownRef}
         data-testid="model-selector-dropdown"
+        role="dialog"
+        aria-label={t('model.configuration')}
         className="fixed z-[var(--z-dropdown)] flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-overlay)]"
         style={{
           top: dropdownPosition.top,
@@ -871,7 +873,7 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
   return (
     <div
       data-testid="model-selector-shell"
-      className={`relative min-w-0 ${appearance === 'field' ? 'flex-1' : fluid ? 'shrink' : 'shrink-0'}`}
+      className={`relative ${appearance === 'field' ? 'min-w-0 flex-1' : fluid ? 'min-w-[112px] max-w-[280px] flex-1' : 'min-w-0 shrink-0'}`}
     >
       {/* No fill at rest: on the composer row the model name is type, not a
           control chip — the handoff reserves filled pills for the permission
@@ -900,6 +902,9 @@ export const ModelSelector = forwardRef<ModelSelectorHandle, Props>(function Mod
           }}
           disabled={disabled}
           aria-label={ariaLabel ?? (buttonProviderLabel ? `${buttonModelLabel}, ${buttonProviderLabel}` : buttonModelLabel)}
+          data-testid="model-selector-trigger"
+          aria-expanded={open}
+          aria-haspopup="dialog"
           title={buttonProviderLabel ? `${buttonProviderLabel} · ${buttonModelLabel}` : buttonModelLabel}
           // `focus-visible:rounded-*` restores the other pair of corners while
           // focused. The ring traces `border-radius`, so on the half-rounded

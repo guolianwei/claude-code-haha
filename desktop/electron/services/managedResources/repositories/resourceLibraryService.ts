@@ -24,9 +24,9 @@ import {
   type ResourceReference,
 } from './resourceDocumentIntegrity.js'
 import type { ResourceDocumentStore } from './resourceDocumentStore.js'
-import type { AccountPasswordWrite, HostCredentialWrite } from '../../../../src/features/managed-resources/api/credentialMutationContract.js'
+import type { AccountPasswordWrite, HostCredentialWrite, SshAccountCredentialWrite } from '../../../../src/features/managed-resources/api/credentialMutationContract.js'
 import {
-  applyHostCredential, createBoundCredential, CredentialMutationError,
+  applyHostCredentials, createBoundCredential, CredentialMutationError,
   hostCredentialIds, removeNewlyUnreferencedCredentials,
   type CredentialMutationDependencies,
 } from './credentialMutation.js'
@@ -74,11 +74,13 @@ export type CreateApplicationInput = Omit<HostApplication, 'id' | 'accounts'> & 
 
 export type CreateHostInput = Omit<Host, 'id' | 'revision' | 'createdAt' | 'updatedAt' | 'applications'> & {
   credential?: HostCredentialWrite
+  sshAccountCredentials?: SshAccountCredentialWrite[]
   applications: CreateApplicationInput[]
 }
 
 export type UpdateHostInput = {
   credential?: HostCredentialWrite
+  sshAccountCredentials?: SshAccountCredentialWrite[]
   id: string
   expectedRevision: number
   changes: Partial<Omit<Host, 'id' | 'revision' | 'createdAt' | 'updatedAt' | 'applications'>>
@@ -295,13 +297,13 @@ export function createResourceLibraryService(
     }),
     createHost: input => execute((draft, afterCommit) => {
       const timestamp = now()
-      const { credential, ...metadata } = input
+      const { credential, sshAccountCredentials, ...metadata } = input
       const host = {
         ...metadata,
         applications: input.applications.map(application => applicationFromInput(draft, application)),
         id: createId(), revision: 1, createdAt: timestamp, updatedAt: timestamp,
       }
-      const parsed = HostSchema.safeParse(applyHostCredential(draft, host, credential, options, afterCommit))
+      const parsed = HostSchema.safeParse(applyHostCredentials(draft, host, credential, sshAccountCredentials, options, afterCommit))
       if (!parsed.success) return rejected('VALIDATION_FAILED', { issues: schemaIssue() })
       draft.hosts.push(parsed.data)
       return accepted('created', parsed.data)
@@ -312,7 +314,7 @@ export function createResourceLibraryService(
       const conflict = hasExpectedRevision(existing, 'host', input.id, input.expectedRevision)
       if (conflict) return conflict
       const candidate = updated({ ...existing!, ...input.changes }, now())
-      const parsed = HostSchema.safeParse(applyHostCredential(draft, candidate, input.credential, options, afterCommit))
+      const parsed = HostSchema.safeParse(applyHostCredentials(draft, candidate, input.credential, input.sshAccountCredentials, options, afterCommit, existing))
       if (!parsed.success) return rejected('VALIDATION_FAILED', { issues: schemaIssue() })
       draft.hosts[index] = parsed.data
       return accepted('updated', parsed.data)

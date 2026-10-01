@@ -105,6 +105,9 @@ describe('ModelSelector', () => {
     const button = screen.getByRole('button', { name: /alpha/i })
     expect(button).toHaveClass('min-w-0', 'flex-1')
     expect(button.querySelector('span')).toHaveClass('truncate')
+    // A zero minimum let the resource buttons hide the entire model selector.
+    expect(screen.getByTestId('model-selector-shell')).toHaveClass('min-w-[112px]', 'flex-1')
+    expect(screen.getByTestId('model-selector-shell')).not.toHaveClass('min-w-0')
   })
 
   it.each([true, false])('sends each provider slot with 1M=%s and preserves reasoning controls', async (enabled) => {

@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import {
-  ConceptSchema, HostSchema, HostAuthSchema, HostApplicationSchema,
+  ConceptSchema, HostSchema, HostAuthSchema, HostApplicationSchema, HostSshAccountSchema,
   HostApplicationAccountSchema, KnownHostKeySchema, ResourceTagSchema,
   UniqueIdObjectArraySchema,
 } from '../../../../src/features/managed-resources/types/resourceSchemas.js'
@@ -15,8 +15,9 @@ const account = HostApplicationAccountSchema.extend({ credentialId: z.null() }).
 const application = HostApplicationSchema.extend({
   accounts: UniqueIdObjectArraySchema(account, 64),
 }).strict()
-const host = HostSchema.extend({
+const host = HostSchema.safeExtend({
   auth,
+  sshAccounts: UniqueIdObjectArraySchema(HostSshAccountSchema.extend({ auth }).strict(), 31).default([]),
   applications: UniqueIdObjectArraySchema(application, 100),
 }).strict()
 const tls = ConnectionTlsSchema.safeExtend({ clientKeyCredentialId: z.null() }).strict()

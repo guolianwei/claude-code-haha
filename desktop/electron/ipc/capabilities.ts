@@ -29,6 +29,7 @@ import {
   isM4BaseRevision,
   isM4EditText,
   isM4FileName,
+  isM4RemoteEntryName,
   isM4Generation,
   isM4OwnerId,
   isM4Uuid,
@@ -363,7 +364,7 @@ const sshCommonFields = (value: Record<string, unknown>): boolean =>
 
 type SshPayloadKind =
   | 'create' | 'start' | 'answer' | 'write' | 'resize' | 'ack' | 'disconnect'
-  | 'list' | 'stat' | 'download' | 'upload' | 'cancelTransfer' | 'getTransfer'
+  | 'list' | 'stat' | 'rename' | 'download' | 'upload' | 'cancelTransfer' | 'getTransfer'
   | 'editOpen' | 'editSave' | 'editClose' | 'mintUpload' | 'mintDownload'
   | 'resolveToken' | 'revokeToken'
 
@@ -373,6 +374,7 @@ type SshPayloadKind =
 const M4_FIELDS_BY_KIND: Partial<Record<SshPayloadKind, readonly string[]>> = {
   list: M4_PAYLOAD_FIELDS.sftpList,
   stat: M4_PAYLOAD_FIELDS.sftpStat,
+  rename: M4_PAYLOAD_FIELDS.sftpRename,
   download: M4_PAYLOAD_FIELDS.transferStartDownload,
   upload: M4_PAYLOAD_FIELDS.transferStartUpload,
   cancelTransfer: M4_PAYLOAD_FIELDS.transferCancel,
@@ -397,8 +399,9 @@ const sshConnectionInput = (kind: SshPayloadKind): Validator =>
     if (sharedFields && !hasOnlyKeys(value, sharedFields)) return false
     switch (kind) {
       case 'create': {
-        if (!hasOnlyKeys(value, ['ownerId', 'hostId', 'expectedRevision', 'cols', 'rows'])) return false
+        if (!hasOnlyKeys(value, ['ownerId', 'hostId', 'accountId', 'expectedRevision', 'cols', 'rows'])) return false
         if (typeof value.hostId !== 'string' || value.hostId.length === 0 || value.hostId.length > 256) return false
+        if (value.accountId !== undefined && !isM4Uuid(value.accountId)) return false
         if (value.expectedRevision !== undefined && !isPositiveInt(value.expectedRevision)) return false
         if (value.cols !== undefined && (typeof value.cols !== 'number' || !Number.isInteger(value.cols) || value.cols < 2 || value.cols > 500)) return false
         if (value.rows !== undefined && (typeof value.rows !== 'number' || !Number.isInteger(value.rows) || value.rows < 1 || value.rows > 300)) return false
@@ -445,6 +448,12 @@ const sshConnectionInput = (kind: SshPayloadKind): Validator =>
         if (!isM4Generation(value.generation)) return false
         return isM4AbsolutePosixPath(value.absolutePath, M4_PATH_MAX_CHARS)
       }
+      case 'rename': {
+        if (!isM4Uuid(value.connectionId)) return false
+        if (!isM4Generation(value.generation)) return false
+        if (!isM4AbsolutePosixPath(value.absolutePath, M4_PATH_MAX_CHARS)) return false
+        return isM4RemoteEntryName(value.newName)
+      }
       case 'download':
       case 'upload': {
         if (!isM4Uuid(value.connectionId)) return false
@@ -488,6 +497,7 @@ export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.appGetLocalePreference]: noPayload,
   [ELECTRON_IPC_CHANNELS.appSetLocalePreference]: localePreference,
   [ELECTRON_IPC_CHANNELS.appGetPreferredSystemLanguages]: noPayload,
+  [ELECTRON_IPC_CHANNELS.networkManager]: value => NetworkRequestSchema.safeParse(value).success,
   [ELECTRON_IPC_CHANNELS.publicAccessGetStatus]: noPayload,
   [ELECTRON_IPC_CHANNELS.publicAccessSaveCredential]: value => typeof value === 'string' && value.trim().length > 0 && value.length <= 4096 && !/\s/.test(value.trim()),
   [ELECTRON_IPC_CHANNELS.publicAccessDeleteCredential]: noPayload,
@@ -497,7 +507,6 @@ export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.publicAccessStop]: noPayload,
   [ELECTRON_IPC_CHANNELS.publicAccessSetAutoStart]: booleanPayload,
   [ELECTRON_IPC_CHANNELS.runtimeGetServerUrl]: noPayload,
-  [ELECTRON_IPC_CHANNELS.networkManager]: value => NetworkRequestSchema.safeParse(value).success,
   [ELECTRON_IPC_CHANNELS.runtimeGetLocalAccessToken]: noPayload,
   [ELECTRON_IPC_CHANNELS.runtimeGetPetAccessToken]: noPayload,
   [ELECTRON_IPC_CHANNELS.commandInvoke]: commandInvoke,
@@ -623,6 +632,7 @@ export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.mrResolveLocalToken]: sshConnectionInput('resolveToken'),
   [ELECTRON_IPC_CHANNELS.mrRevokeLocalToken]: sshConnectionInput('revokeToken'),
   [ELECTRON_IPC_CHANNELS.mrSftpStat]: sshConnectionInput('stat'),
+  [ELECTRON_IPC_CHANNELS.mrSftpRename]: sshConnectionInput('rename'),
   [ELECTRON_IPC_CHANNELS.mrTransferStartDownload]: sshConnectionInput('download'),
   [ELECTRON_IPC_CHANNELS.mrTransferStartUpload]: sshConnectionInput('upload'),
   [ELECTRON_IPC_CHANNELS.mrTransferUploadFolder]: value => FolderTransferInputSchema.safeParse(value).success,
