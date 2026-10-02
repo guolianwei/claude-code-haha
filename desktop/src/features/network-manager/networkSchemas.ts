@@ -33,6 +33,8 @@ export const NetworkProfileSchema = z.object({
   mode: z.enum(['home', 'work']),
   vpnName: systemName,
   vpnScope: z.enum(['allUsers', 'currentUser']),
+  vpnServerAddress: z.string().max(253).regex(/^[a-zA-Z0-9.-]*$/).default(''),
+  splitTunnelingPolicy: z.enum(['preserve', 'enabled']).default('preserve'),
   managementPrefix: prefix,
   gatewayAddress: ipv4,
   gatewayPort: port,
@@ -51,11 +53,22 @@ export const NetworkProfileSchema = z.object({
   relayTaskName: systemName.regex(/^(?:Zjwj Arm62 |CC-Haha ).+$/, 'Use a dedicated relay task'),
   relayPort: port,
   expectedRelaySource: z.union([z.literal(''), ipv4]),
+  relayExecutable: localFile(/\.exe$/i).default(''),
+  relayLocalPort: port.default(51824),
+  tunnelAddress: ipv4.default('10.78.62.2'),
+  readinessTimeoutSeconds: z.number().int().min(10).max(120).default(60),
+  verificationTargets: z.array(z.object({ id: z.string().min(1).max(80), label: text,
+    address: ipv4, port, protocol: z.enum(['tcp', 'http', 'https']),
+  }).strict()).max(32).default([]),
 }).strict().superRefine((value, ctx) => {
   if (!isAddressInPrefix(value.gatewayAddress, value.managementPrefix)) {
     ctx.addIssue({ code: 'custom', path: ['gatewayAddress'], message: 'Gateway must belong to the management prefix' })
   }
   if (value.containerEnabled) {
+    if (new Set(value.verificationTargets.map(target => target.id)).size !== value.verificationTargets.length
+      || value.verificationTargets.some(target => !isAddressInPrefix(target.address, value.containerPrefix))) {
+      ctx.addIssue({ code: 'custom', path: ['verificationTargets'], message: 'Use unique target IDs and addresses within the container prefix' })
+    }
     if (!isAddressInPrefix(value.containerProbeAddress, value.containerPrefix)) {
       ctx.addIssue({ code: 'custom', path: ['containerProbeAddress'], message: 'Probe must belong to the container prefix' })
     }
@@ -71,6 +84,8 @@ export const NetworkRequestSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('discoverProxy'), proxyPort: port }).strict(),
   z.object({ action: z.literal('executionCatalog') }).strict(),
   z.object({ action: z.literal('openNetworkConnections') }).strict(),
+  z.object({ action: z.literal('openSystemTool'), target: z.enum(['tasks', 'services']) }).strict(),
+  z.object({ action: z.literal('verifyStep'), profile: NetworkProfileSchema, step: z.enum(['physical', 'vpn', 'management', 'proxy', 'relay', 'tunnel', 'container']) }).strict(),
   z.object({ action: z.literal('list') }).strict(),
   z.object({ action: z.literal('recover') }).strict(),
   z.object({ action: z.literal('save'), profile: NetworkProfileSchema, expectedRevision: z.number().int().nonnegative() }).strict(),
@@ -89,20 +104,30 @@ export const NetworkRequestSchema = z.discriminatedUnion('action', [
 ])
 
 export const NetworkProfilesDocumentSchema = z.object({
-  schemaVersion: z.literal(1), revision: z.number().int().nonnegative(),
+  schemaVersion: z.literal(2), revision: z.number().int().nonnegative(),
   profiles: z.array(NetworkProfileSchema).min(1).max(30),
 }).strict().refine(document => new Set(document.profiles.map(profile => profile.id)).size === document.profiles.length, 'Duplicate profile IDs')
 
 /** Absent storage and the initial unversioned format migrate forward; future schemas never get overwritten. */
 export function migrateNetworkProfiles(raw: unknown): NetworkProfilesDocument {
-  if (raw === null || raw === undefined) return { schemaVersion: 1, revision: 0, profiles: createDefaultNetworkProfiles() }
+  if (raw === null || raw === undefined) return { schemaVersion: 2, revision: 0, profiles: createDefaultNetworkProfiles() }
+  const versionOne = z.object({ schemaVersion: z.literal(1), revision: z.number().int().nonnegative(), profiles: z.array(z.record(z.string(), z.unknown())).min(1).max(30) }).strict().safeParse(raw)
+  if (versionOne.success) {
+    const defaults = createDefaultNetworkProfiles()
+    return NetworkProfilesDocumentSchema.parse({ ...versionOne.data, schemaVersion: 2, profiles: versionOne.data.profiles.map(profile => ({
+      ...defaults[profile.mode === 'work' ? 1 : 0], ...profile,
+      vpnServerAddress: typeof profile.vpnServerAddress === 'string' ? profile.vpnServerAddress : ipv4.safeParse(profile.vpnName).success ? profile.vpnName : '',
+      splitTunnelingPolicy: profile.splitTunnelingPolicy ?? 'preserve',
+    })) })
+  }
   const legacy = z.object({ schemaVersion: z.literal(0).optional(), profiles: z.array(z.record(z.string(), z.unknown())).max(30) }).strict().safeParse(raw)
   if (legacy.success) {
     const defaults = createDefaultNetworkProfiles()
     return NetworkProfilesDocumentSchema.parse({
-      schemaVersion: 1, revision: 0,
+      schemaVersion: 2, revision: 0,
       profiles: legacy.data.profiles.length ? legacy.data.profiles.map(profile => ({
         ...defaults[profile.mode === 'work' ? 1 : 0], ...profile,
+        vpnServerAddress: typeof profile.vpnServerAddress === 'string' ? profile.vpnServerAddress : profile.vpnName === undefined ? defaults[0]!.vpnServerAddress : ipv4.safeParse(profile.vpnName).success ? profile.vpnName : '',
       })) : defaults,
     })
   }

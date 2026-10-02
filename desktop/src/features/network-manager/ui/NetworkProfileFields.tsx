@@ -3,12 +3,13 @@ import type { ReactNode } from 'react'
 import { Button } from '@/components/ui/Button'
 import { Checkbox } from '@/components/ui/Checkbox'
 import { Input } from '@/components/ui/Input'
-import { SelectField } from '@/components/ui/SelectField'
 import { useTranslation, type TranslationKey } from '@/i18n'
-import type { NetworkManagerApi, NetworkProfile } from '../networkTypes'
+import type { NetworkManagerApi, NetworkPlan, NetworkProbe, NetworkProfile, NetworkSnapshot, NetworkStepId } from '../networkTypes'
 import type { useSakuraDiscovery } from '../useSakuraDiscovery'
 import { SakuraRuntimeFields } from './SakuraRuntimeFields'
 import { NetworkExecutionReference } from './NetworkExecutionReference'
+import { VpnProfileSelector } from './VpnProfileSelector'
+import { NetworkStepEvidence } from './NetworkStepEvidence'
 
 export type NetworkProfileStage = 'physical' | 'vpn' | 'proxy' | 'containers'
 export type NetworkStageState = 'passed' | 'failed'
@@ -18,6 +19,9 @@ type Props = {
   effectiveProfile?: NetworkProfile
   api?: NetworkManagerApi
   sakura?: ReturnType<typeof useSakuraDiscovery>
+  snapshot?: NetworkSnapshot | null
+  probes?: NetworkProbe[]
+  plan?: NetworkPlan | null
   disabled: boolean
   previewDisabled?: boolean
   activeStage?: NetworkProfileStage
@@ -26,9 +30,12 @@ type Props = {
   onStageFocus?: (stage: NetworkProfileStage) => void
   onChange: (profile: NetworkProfile) => void
   onLogin: (target: 'vpn' | 'sakura') => void
-  onPick: (field: 'proxyConfigPath' | 'sakuraExecutable') => void
+  onPick: (field: 'proxyConfigPath' | 'sakuraExecutable' | 'relayExecutable') => void
   onValidate?: (stage: NetworkProfileStage) => void
   onPreview?: (stage: 'physical' | 'vpn' | 'containers') => void
+  onValidateLink?: (step: NetworkStepId) => void
+  onOpenSystemTool?: (target: 'tasks' | 'services') => void
+  onNavigate?: (stage: NetworkProfileStage | 'plan' | 'verify') => void
   vpnRoutePanel?: ReactNode
 }
 
@@ -39,6 +46,9 @@ export function NetworkProfileFields({
   effectiveProfile = profile,
   api,
   sakura,
+  snapshot,
+  probes,
+  plan,
   disabled,
   previewDisabled = false,
   activeStage,
@@ -50,6 +60,9 @@ export function NetworkProfileFields({
   onPick,
   onValidate,
   onPreview,
+  onValidateLink,
+  onOpenSystemTool,
+  onNavigate,
   vpnRoutePanel,
 }: Props) {
   const t = useTranslation()
@@ -78,6 +91,7 @@ export function NetworkProfileFields({
   const reference = (stage: NetworkProfileStage) => api && <NetworkExecutionReference api={api} stage={stage} profile={effectiveProfile}
     extra={stage === 'proxy' && sakura?.discovery?.selected ? { source: 'process-argument', ...sakura.discovery.selected }
       : stage === 'containers' ? { serviceName: `WireGuardTunnel$${profile.tunnelName}`, interfaceIndex: 'Find-NetRoute → InterfaceIndex (runtime)', mode: profile.mode } : { mode: profile.mode }} />
+  const evidence = (step: NetworkStepId) => <NetworkStepEvidence step={step} profile={profile} snapshot={snapshot} probes={probes} plan={plan} />
 
   return <div className="min-w-0 space-y-3">
     <section ref={node => registerSection?.('physical', node)} className={sectionClass('physical')} onFocusCapture={() => onStageFocus?.('physical')}>
@@ -93,8 +107,11 @@ export function NetworkProfileFields({
       </div>
       <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onValidate?.('physical')}>{t('networkManager.validatePhysical')}</Button>
+        <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onValidateLink?.('management')}>{t('networkManager.recovery.checkHost')}</Button>
         <Button size="sm" disabled={disabled || previewDisabled} onClick={() => onPreview?.('physical')}>{t('networkManager.previewRoute')}</Button>
+        {profile.mode === 'home' && <Button size="sm" variant="secondary" onClick={() => onNavigate?.('vpn')}>{t('networkManager.recovery.goVpn')}</Button>}
       </div>
+      {evidence('physical')}
       {reference('physical')}
     </section>
 
@@ -105,20 +122,17 @@ export function NetworkProfileFields({
       </div>
       <p className={hintClass}>{t(profile.mode === 'home' ? 'networkManager.vpnHint' : 'networkManager.workHint')}</p>
       {profile.mode === 'home' ? <>
-        <div className="grid gap-3 sm:grid-cols-2">
-          {field('vpnName', 'networkManager.vpnName')}
-          <SelectField label={t('networkManager.vpnScope')} value={profile.vpnScope} size="md" disabled={disabled}
-            options={[{ value: 'allUsers', label: t('networkManager.allUsers') }, { value: 'currentUser', label: t('networkManager.currentUser') }]}
-            onChange={vpnScope => onChange({ ...profile, vpnScope })} />
-        </div>
+        <VpnProfileSelector api={api} profile={profile} disabled={disabled} onChange={onChange} />
         <div className="flex flex-wrap gap-2">
           <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onValidate?.('vpn')}>{t('networkManager.validateVpn')}</Button>
           <Button size="sm" disabled={disabled} onClick={() => onLogin('vpn')}>{t('networkManager.loginVpn')}</Button>
+          <Button size="sm" variant="secondary" onClick={() => onNavigate?.('physical')}>{t('networkManager.recovery.goHost')}</Button>
         </div>
       </> : <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onValidate?.('vpn')}>{t('networkManager.validateVpn')}</Button>
         <Button size="sm" disabled={disabled || previewDisabled} onClick={() => onPreview?.('vpn')}>{t('networkManager.previewRoute')}</Button>
       </div>}
+      {evidence('vpn')}
       {reference('vpn')}
       {vpnRoutePanel}
     </section>
@@ -140,6 +154,7 @@ export function NetworkProfileFields({
         <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onValidate?.('proxy')}>{t('networkManager.validateProxy')}</Button>
         <Button size="sm" disabled={disabled || sakura?.detecting || sakura?.discovery?.running} onClick={() => onLogin('sakura')}>{t('networkManager.startSakura')}</Button>
       </div>
+      {evidence('proxy')}
       {reference('proxy')}
     </section>
 
@@ -150,6 +165,7 @@ export function NetworkProfileFields({
       </div>
       <p className={hintClass}>{t('networkManager.containerHint')}</p>
       <p className={hintClass}>{t('networkManager.deployedHint')}</p>
+      <p className={hintClass}>{t('networkManager.recovery.deploymentHint')}</p>
       <Checkbox label={t('networkManager.containerEnabled')} checked={profile.containerEnabled} disabled={disabled}
         onChange={event => onChange({ ...profile, containerEnabled: event.target.checked })} />
       {profile.containerEnabled && <div className="grid gap-3 sm:grid-cols-2">
@@ -162,11 +178,37 @@ export function NetworkProfileFields({
           {field('relayPort', 'networkManager.relayPort', true)}
           <Input label={t('networkManager.expectedSource')} hint={t('networkManager.expectedSourceHint')} value={profile.expectedRelaySource}
             disabled={disabled} size="md" onChange={event => onChange({ ...profile, expectedRelaySource: event.target.value })} />
+          {field('relayLocalPort', 'networkManager.recovery.localPort', true)}
+          {field('tunnelAddress', 'networkManager.recovery.tunnelAddress')}
+          <Input label={t('networkManager.recovery.relayExecutable')} value={profile.relayExecutable} disabled={disabled} size="md"
+            onChange={event => onChange({ ...profile, relayExecutable: event.target.value })} />
+          <Input label={t('networkManager.recovery.timeout')} hint={t('networkManager.recovery.timeoutHint')} value={profile.readinessTimeoutSeconds}
+            type="number" min={10} max={120} disabled={disabled} size="md" onChange={event => onChange({ ...profile, readinessTimeoutSeconds: Number(event.target.value) })} />
         </>}
       </div>}
+      {profile.containerEnabled && profile.mode === 'home' && <>
+        <p className={hintClass}>{t('networkManager.recovery.relayHint')}</p>
+        <p className={hintClass}>{t('networkManager.recovery.taskFix')}</p>
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onPick('relayExecutable')}>{t('networkManager.recovery.chooseRelay')}</Button>
+          <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onValidateLink?.('relay')}>{t('networkManager.recovery.checkRelay')}</Button>
+          <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onOpenSystemTool?.('tasks')}>{t('networkManager.recovery.openTasks')}</Button>
+        </div>
+        {evidence('relay')}
+        <div className="flex flex-wrap gap-2">
+          <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onValidateLink?.('tunnel')}>{t('networkManager.recovery.checkTunnel')}</Button>
+          <Button size="sm" variant="secondary" disabled={disabled} onClick={() => onOpenSystemTool?.('services')}>{t('networkManager.recovery.openServices')}</Button>
+        </div>
+        {evidence('tunnel')}
+      </>}
       <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="secondary" disabled={disabled || !profile.containerEnabled} onClick={() => onValidate?.('containers')}>{t('networkManager.validateContainers')}</Button>
         <Button size="sm" disabled={disabled || previewDisabled || !profile.containerEnabled} onClick={() => onPreview?.('containers')}>{t('networkManager.previewContainer')}</Button>
+      </div>
+      {profile.containerEnabled && evidence('container')}
+      <div className="flex flex-wrap gap-2">
+        <Button size="sm" variant="secondary" onClick={() => onNavigate?.('plan')}>{t('networkManager.recovery.nextPlan')}</Button>
+        <Button size="sm" variant="secondary" onClick={() => onNavigate?.('verify')}>{t('networkManager.recovery.nextTargets')}</Button>
       </div>
       {reference('containers')}
     </section>

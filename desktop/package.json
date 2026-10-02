@@ -22,6 +22,7 @@
       "node_modules/detect-libc/**",
       "node_modules/semver/**",
       "src-tauri/binaries/**",
+      "src-tauri/icons/icon.ico",
       "node_modules/@ngrok/**"
     ],
     "artifactName": "Claude-Code-Haha-${version}-${os}-${arch}.${ext}",

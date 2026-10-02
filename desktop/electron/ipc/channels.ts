@@ -102,6 +102,7 @@ export const ELECTRON_IPC_CHANNELS = {
   mrSaveCredential: 'desktop:managed-resources:save-credential',
   mrDeleteCredential: 'desktop:managed-resources:delete-credential',
   mrRevealCredential: 'desktop:managed-resources:reveal-credential',
+  mrCopyTagConnections: 'desktop:managed-resources:copy-tag-connections',
   mrProvideTemporaryCredential: 'desktop:managed-resources:provide-temporary-credential',
   mrListConcepts: 'desktop:managed-resources:list-concepts',
   mrGetConcept: 'desktop:managed-resources:get-concept',

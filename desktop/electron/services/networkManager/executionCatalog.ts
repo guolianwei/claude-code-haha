@@ -1,6 +1,7 @@
 import type { NetworkExecutionAction, NetworkExecutionCatalog } from '../../../src/features/network-manager/networkTypes'
 import { NETWORK_SCRIPT } from './powershell'
 import { SAKURA_DISCOVERY_FUNCTIONS } from './proxyDiscoveryScript'
+import { RELAY_RECOVERY_FUNCTIONS } from './relayRecoveryScript'
 
 const nativeSource = 'desktop/electron/services/networkManager/powershell.ts#NETWORK_SCRIPT'
 const serviceSource = 'desktop/electron/services/networkManager/service.ts#createNetworkManagerService'
@@ -16,6 +17,7 @@ export function networkScriptBranch(action: string): string {
   const vpnArgs = NETWORK_SCRIPT.split('\n').find(line => line.startsWith('function VpnArgs ')) ?? ''
   return [
     ['proxyDiscover', 'proxyController'].includes(action) ? SAKURA_DISCOVERY_FUNCTIONS.trim() : '',
+    action.startsWith('relay') || ['task', 'taskEnabled'].includes(action) ? RELAY_RECOVERY_FUNCTIONS.trim() : '',
     ['split', 'vpnRouteAdd', 'vpnRouteRemove'].includes(action) ? vpnArgs : '',
     branch.trim(),
   ].filter(Boolean).join('\n\n')
@@ -23,8 +25,8 @@ export function networkScriptBranch(action: string): string {
 
 /** Read-only source catalogue: never reads a user file, runs a command or fetches credentials. */
 export function getNetworkExecutionCatalog(): NetworkExecutionCatalog {
-  const actions: NetworkExecutionAction[] = ['snapshot', 'proxyDiscover', 'proxyController', 'copyAcl', 'split', 'vpnRouteAdd', 'vpnRouteRemove', 'routeAdd', 'routeRemove', 'service', 'serviceStartup', 'task', 'taskEnabled'].map(id => ({
-    id, kind: ['snapshot', 'proxyDiscover', 'proxyController'].includes(id) ? 'read' : 'write',
+  const actions: NetworkExecutionAction[] = ['snapshot', 'proxyDiscover', 'proxyController', 'relayInspect', 'relayTaskCreate', 'relayTaskRemove', 'copyAcl', 'split', 'vpnRouteAdd', 'vpnRouteRemove', 'routeAdd', 'routeRemove', 'service', 'serviceStartup', 'task', 'taskEnabled'].map(id => ({
+    id, kind: ['snapshot', 'proxyDiscover', 'proxyController', 'relayInspect'].includes(id) ? 'read' : 'write',
     source: nativeSource, functionName: 'runNetworkPowerShell', script: networkScriptBranch(id),
   }))
   const add = (id: string, kind: NetworkExecutionAction['kind'], source: string, functionName: string, script = '') => actions.push({ id, kind, source, functionName, script })
@@ -34,6 +36,8 @@ export function getNetworkExecutionCatalog(): NetworkExecutionCatalog {
   add('apply', 'write', serviceSource, 'apply(planId) → stableSnapshot → runner(command) → verify(profile)')
   add('recover', 'write', serviceSource, 'recover() → readJournal() → rollback(journal, report)')
   add('verify', 'probe', serviceSource, 'verify(profile) → routeCheck / probeTcp / probeHttpProxy')
+  add('verifyStep', 'probe', serviceSource, 'verifyStep(profile, step) → observe → probes for the selected link only')
+  add('openSystemTool', 'launch', serviceSource, 'openSystemTool(tasks | services) → Electron shell.openPath(System32/taskschd.msc | services.msc)')
   add('openNetworkConnections', 'launch', serviceSource, 'openNetworkConnections() → Electron shell.openPath(system applet)', 'ncpa.cpl\nTarget: <SystemRoot>\\System32\\ncpa.cpl\nNative Windows file association; no cmd or PowerShell; no renderer arguments.\nOpens the window only. Adapter changes are manual; re-inspect before applying a plan.')
   add('loginVpn', 'launch', serviceSource, "login('vpn', profile) → openExternal('ms-settings:network-vpn')")
   add('loginSakura', 'launch', serviceSource, "login('sakura', profile) → discoverSakura → openPath(profile.sakuraExecutable)")
@@ -44,6 +48,7 @@ export function getNetworkExecutionCatalog(): NetworkExecutionCatalog {
   add('http-direct', 'probe', 'desktop/electron/services/networkManager/probes.ts', 'probeDirectHttp(address, port, protocol)')
   add('probeHost', 'probe', serviceSource, 'probeHost(hostId) → resolveHost(hostId) → probeTcp(host.address, host.port)')
   add('vpnBinding', 'write', serviceSource, 'vpnRouteBatchPreview / vpnRouteBatchApply → activateBinding → selectedVpn; failure → rollbackBinding')
+  add('vpnRouteOptions', 'read', serviceSource, 'vpnRouteOptions() → observeBinding → scoped connection names, servers and routing policies')
   add('vpnRouteProbe', 'probe', serviceSource, 'vpnRouteProbe(input) → observeBinding → probeTcp / probeDirectHttp')
-  return { actions, executor: 'runNetworkPowerShell: Windows PowerShell -NoProfile -NonInteractive -EncodedCommand; JSON parameters on stdin; shell=false; 30s timeout; 2 MB output limit.' }
+  return { actions, executor: 'runNetworkPowerShell: fixed Windows PowerShell bootstrap; constant source and JSON parameters on stdin; shell=false; bounded process timeout; 2 MB output limit.' }
 }

@@ -1,17 +1,21 @@
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { SAKURA_DISCOVERY_FUNCTIONS } from './proxyDiscoveryScript'
+import { RELAY_RECOVERY_FUNCTIONS } from './relayRecoveryScript'
 
 /** Commands are fixed source. Profile values are JSON on stdin, never PowerShell source. */
 export const NETWORK_SCRIPT = String.raw`
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
 $p = [Console]::In.ReadToEnd() | ConvertFrom-Json
 function VpnArgs { $v = @{Name=[string]$p.name; ErrorAction='Stop'}; if ($p.scope -eq 'allUsers') {$v.AllUserConnection=$true}; return $v }
 ${SAKURA_DISCOVERY_FUNCTIONS}
+${RELAY_RECOVERY_FUNCTIONS}
 switch ($p.action) {
+  'relayInspect' { Inspect-Relay | ConvertTo-Json -Depth 8 -Compress }
+  'relayTaskCreate' { Create-RelayTask | ConvertTo-Json -Depth 4 -Compress }
+  'relayTaskRemove' { Remove-RelayTask }
   'copyAcl' { Get-Acl -LiteralPath $p.source -ErrorAction Stop | Set-Acl -LiteralPath $p.target -ErrorAction Stop }
   'proxyDiscover' { Get-SakuraProcesses | ConvertTo-Json -Depth 6 -Compress }
   'proxyController' {
@@ -45,7 +49,7 @@ switch ($p.action) {
     foreach ($all in @($false,$true)) {
       $vpns += @(Read-Part ('vpn/' + $all) {
         $profiles = if ($all) { Get-VpnConnection -AllUserConnection } else { Get-VpnConnection }
-        foreach ($vpn in $profiles) { [pscustomobject]@{name=$vpn.Name;scope=$(if($all){'allUsers'}else{'currentUser'});connected=([string]$vpn.ConnectionStatus -eq 'Connected');splitTunneling=[bool]$vpn.SplitTunneling;routes=@($vpn.Routes | ForEach-Object { [pscustomobject]@{prefix=$_.DestinationPrefix;metric=$_.RouteMetric} })} }
+        foreach ($vpn in $profiles) { [pscustomobject]@{name=$vpn.Name;serverAddress=[string]$vpn.ServerAddress;scope=$(if($all){'allUsers'}else{'currentUser'});connected=([string]$vpn.ConnectionStatus -eq 'Connected');splitTunneling=[bool]$vpn.SplitTunneling;routes=@($vpn.Routes | ForEach-Object { [pscustomobject]@{prefix=$_.DestinationPrefix;metric=$_.RouteMetric} })} }
       })
     }
     $selected = @(foreach ($target in $p.targets) {
@@ -56,8 +60,20 @@ switch ($p.action) {
         [pscustomobject]@{target=$target;source=$ip.IPAddress;interfaceIndex=$route.InterfaceIndex;interfaceAlias=$route.InterfaceAlias;prefix=$route.DestinationPrefix;nextHop=$route.NextHop}
       }
     })
-    $service = Read-Part 'tunnelService' { Get-Service -Name $p.service | Select-Object Name,@{n='status';e={[string]$_.Status}},@{n='startType';e={[string]$_.StartType}} }
-    $task = Read-Part 'relayTask' { Get-ScheduledTask -TaskName $p.task -TaskPath '\' | Select-Object TaskName,@{n='state';e={[string]$_.State}},@{n='enabled';e={[bool]$_.Settings.Enabled}} }
+    $service=$null; $serviceStatus='unknown'
+    try {
+      $services=@(Get-CimInstance Win32_Service -OperationTimeoutSec 5 -ErrorAction Stop | Where-Object { $_.Name -eq [string]$p.service })
+      $serviceStatus=if($services.Count -eq 0){'missing'}else{'present'}
+      if ($services.Count -eq 1) { $service=[pscustomobject]@{Name=$services[0].Name;status=[string]$services[0].State;startType=$(switch([string]$services[0].StartMode){'Auto'{'Automatic'} 'Manual'{'Manual'} 'Disabled'{'Disabled'} default{[string]$services[0].StartMode}})} }
+      elseif ($services.Count -gt 1) { throw 'ambiguous service' }
+    } catch { $serviceStatus='unknown'; $issues.Add('tunnelService: unavailable or insufficient permission') }
+    $task=$null; $taskStatus='unknown'
+    try {
+      $tasks=@(Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object { $_.TaskName -eq [string]$p.task })
+      $taskStatus=if($tasks.Count -eq 0){'missing'}else{'present'}
+      if ($tasks.Count -eq 1) { $task=$tasks[0] | Select-Object TaskName,@{n='state';e={[string]$_.State}},@{n='enabled';e={[bool]$_.Settings.Enabled}} }
+      elseif ($tasks.Count -gt 1) { throw 'ambiguous task' }
+    } catch { $taskStatus='unknown'; $issues.Add('relayTask: unavailable or insufficient permission') }
     $handshakes = @(Read-Part 'handshake' {
       $wg = Join-Path $env:ProgramFiles 'WireGuard\wg.exe'
       if (Test-Path -LiteralPath $wg) {
@@ -66,9 +82,18 @@ switch ($p.action) {
         foreach ($line in $lines) { $parts = $line -split '\s+'; if ($parts.Length -eq 2) { [long]$parts[1] } }
       }
     })
+    $receivedBytes=$null; $sentBytes=$null
+    try {
+      $wg=Join-Path $env:ProgramFiles 'WireGuard\wg.exe'
+      if (-not (Test-Path -LiteralPath $wg)) { throw 'WireGuard unavailable' }
+      $transferLines=@(& $wg show $p.tunnel transfer 2>$null)
+      if ($LASTEXITCODE -ne 0) { throw 'unavailable' }
+      $receivedBytes=0L; $sentBytes=0L
+      foreach($line in $transferLines) { $parts=$line -split '\s+'; if($parts.Length -ne 3){throw 'invalid transfer'}; $receivedBytes += [long]$parts[1]; $sentBytes += [long]$parts[2] }
+    } catch { $receivedBytes=$null; $sentBytes=$null; $issues.Add('transfer: unavailable or insufficient permission') }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $admin = ([Security.Principal.WindowsPrincipal]::new($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    [pscustomobject]@{interfaces=$interfaces;addresses=$addresses;adapters=$adapters;routes=$routes;vpns=$vpns;selected=$selected;service=$service;task=$task;handshakes=$handshakes;admin=$admin;issues=@($issues.ToArray())} | ConvertTo-Json -Depth 10 -Compress
+    [pscustomobject]@{interfaces=$interfaces;addresses=$addresses;adapters=$adapters;routes=$routes;vpns=$vpns;selected=$selected;service=$service;serviceStatus=$serviceStatus;task=$task;taskStatus=$taskStatus;handshakes=$handshakes;receivedBytes=$receivedBytes;sentBytes=$sentBytes;admin=$admin;issues=@($issues.ToArray())} | ConvertTo-Json -Depth 10 -Compress
   }
   'split' { $args = VpnArgs; Set-VpnConnection @args -SplitTunneling ([bool]$p.enabled) | Out-Null }
   'vpnRouteAdd' { $args = @{ConnectionName=[string]$p.name;DestinationPrefix=[string]$p.prefix;RouteMetric=[int]$p.metric;ErrorAction='Stop'}; if ($p.scope -eq 'allUsers') {$args.AllUserConnection=$true}; Add-VpnConnectionRoute @args | Out-Null }
@@ -81,14 +106,34 @@ switch ($p.action) {
   }
   'service' { if ($p.running) { Start-Service -Name $p.name -ErrorAction Stop } else { Stop-Service -Name $p.name -ErrorAction Stop } }
   'serviceStartup' { Set-Service -Name $p.name -StartupType $p.startType -ErrorAction Stop }
-  'task' { if ($p.running) { Start-ScheduledTask -TaskName $p.name -TaskPath '\' -ErrorAction Stop } else { Stop-ScheduledTask -TaskName $p.name -TaskPath '\' -ErrorAction Stop } }
-  'taskEnabled' { if ($p.enabled) { Enable-ScheduledTask -TaskName $p.name -TaskPath '\' -ErrorAction Stop | Out-Null } else { Disable-ScheduledTask -TaskName $p.name -TaskPath '\' -ErrorAction Stop | Out-Null } }
+  'task' {
+    if ($p.PSObject.Properties.Name -contains 'expectedTaskFingerprint') {
+      $owned=Confirm-RelayTaskFingerprint ([string]$p.name) ([string]$p.expectedTaskFingerprint)
+      if ($p.running) { $owned | Start-ScheduledTask -ErrorAction Stop } else { $owned | Stop-ScheduledTask -ErrorAction Stop }
+    } else {
+      if ($p.running) { Start-ScheduledTask -TaskName $p.name -TaskPath '\' -ErrorAction Stop } else { Stop-ScheduledTask -TaskName $p.name -TaskPath '\' -ErrorAction Stop }
+    }
+  }
+  'taskEnabled' {
+    if ($p.PSObject.Properties.Name -contains 'expectedTaskFingerprint') {
+      $owned=Confirm-RelayTaskFingerprint ([string]$p.name) ([string]$p.expectedTaskFingerprint)
+      if ($p.enabled) { $owned | Enable-ScheduledTask -ErrorAction Stop | Out-Null } else { $owned | Disable-ScheduledTask -ErrorAction Stop | Out-Null }
+    } else {
+      if ($p.enabled) { Enable-ScheduledTask -TaskName $p.name -TaskPath '\' -ErrorAction Stop | Out-Null } else { Disable-ScheduledTask -TaskName $p.name -TaskPath '\' -ErrorAction Stop | Out-Null }
+    }
+  }
   default { throw 'Unsupported network operation' }
 }
 `
 
 export type NetworkCommand = { action: string; [key: string]: unknown }
 export type NetworkRunner = (command: NetworkCommand) => Promise<unknown>
+
+// Only this fixed bootstrap is put on the Windows command line (32,767-character limit).
+// The first stdin line is always our constant source; all profile values follow as JSON.
+export const NETWORK_BOOTSTRAP = String.raw`[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)
+$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadLine()))
+& ([ScriptBlock]::Create($source))`
 
 export const runNetworkPowerShell: NetworkRunner = command => new Promise((resolve, reject) => {
   if (process.platform !== 'win32') return reject(new Error('WINDOWS_REQUIRED'))
@@ -98,7 +143,7 @@ export const runNetworkPowerShell: NetworkRunner = command => new Promise((resol
   for (const key of Object.keys(environment)) if (key.toLowerCase() === 'psmodulepath') delete environment[key]
   const shellDirectory = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0')
   environment.PSModulePath = path.join(shellDirectory, 'Modules')
-  const child = spawn(path.join(shellDirectory, 'powershell.exe'), ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(NETWORK_SCRIPT, 'utf16le').toString('base64')], {
+  const child = spawn(path.join(shellDirectory, 'powershell.exe'), ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(NETWORK_BOOTSTRAP, 'utf16le').toString('base64')], {
     windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], shell: false, env: environment,
   })
   let output = ''
@@ -110,12 +155,12 @@ export const runNetworkPowerShell: NetworkRunner = command => new Promise((resol
     if (error) reject(error)
     else { try { resolve(output.trim() ? JSON.parse(output.replace(/^\uFEFF/, '')) : null) } catch { reject(new Error('NETWORK_RESPONSE_INVALID')) } }
   }
-  const timer = setTimeout(() => { child.kill(); finish(new Error('NETWORK_OPERATION_TIMEOUT')) }, 30_000)
+  const timer = setTimeout(() => { child.kill(); finish(new Error('NETWORK_OPERATION_TIMEOUT')) }, 25_000)
   child.stdout.on('data', (chunk: Buffer) => { output += chunk.toString('utf8'); if (output.length > 2_000_000) { child.kill(); finish(new Error('NETWORK_RESPONSE_LIMIT')) } })
   // Native diagnostics may include config values. Expose a fixed failure code only.
   child.stderr.resume()
   child.on('error', () => finish(new Error('NETWORK_EXECUTOR_UNAVAILABLE')))
   child.on('close', code => finish(code === 0 ? undefined : new Error('NETWORK_OPERATION_FAILED')))
   child.stdin.on('error', () => undefined)
-  child.stdin.end(JSON.stringify(command))
+  child.stdin.end(Buffer.from(NETWORK_SCRIPT, 'utf8').toString('base64') + '\n' + JSON.stringify(command))
 })

@@ -23,7 +23,7 @@ export function createNetworkRepository(configDir: string) {
       if ((await fs.stat(filePath)).size > 1_000_000) throw new Error('NETWORK_CONFIG_LIMIT')
       return migrateNetworkProfiles(JSON.parse(await fs.readFile(filePath, 'utf8')))
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { schemaVersion: 1, revision: 0, profiles: createDefaultNetworkProfiles() }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { schemaVersion: 2, revision: 0, profiles: createDefaultNetworkProfiles() }
       throw new Error('NETWORK_CONFIG_INVALID')
     }
   }

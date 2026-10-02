@@ -52,6 +52,7 @@ import {
 import { installMacOsChromiumKeychainPromptGuard } from './services/keychain'
 import { installStdioWriteFailureGuards } from './services/stdioGuards'
 import { applyWindowsAppUserModelId } from './services/appIdentity'
+import { applyWindowsTaskbarIcon, resolveWindowsWindowIconPath } from './services/windowIcon'
 import { installMainWindowNavigationGuards, installPreviewNavigationGuards } from './services/navigationGuards'
 import { installPreviewCleanupOnRendererNavigation } from './services/previewLifecycle'
 import { logNotificationSmokeRendererAck, scheduleNotificationSmoke } from './services/notificationSmoke'
@@ -224,7 +225,9 @@ async function openTraceWindow(sessionId: string) {
     return
   }
 
+  const iconPath = resolveWindowsWindowIconPath(appRoot())
   const traceWindow = new BrowserWindow({
+    icon: iconPath,
     width: 1180,
     height: 780,
     minWidth: 860,
@@ -240,6 +243,7 @@ async function openTraceWindow(sessionId: string) {
       sandbox: true,
     },
   })
+  applyWindowsTaskbarIcon(traceWindow, iconPath)
   traceWindows.set(sessionId, traceWindow)
   traceWindow.on('closed', () => {
     traceWindows.delete(sessionId)
@@ -891,8 +895,10 @@ function registerIpcHandlers() {
 async function createMainWindow() {
   const restoredState = readWindowState(app, screen.getAllDisplays())
   const bounds = windowOptionsFromState(restoredState)
+  const iconPath = resolveWindowsWindowIconPath(appRoot())
   mainWindow = new BrowserWindow({
     ...bounds,
+    icon: iconPath,
     minWidth: MIN_WINDOW_WIDTH,
     minHeight: MIN_WINDOW_HEIGHT,
     show: false,
@@ -907,6 +913,7 @@ async function createMainWindow() {
       sandbox: true,
     },
   })
+  applyWindowsTaskbarIcon(mainWindow, iconPath)
   configureLocalServerRequestAuth(
     mainWindow.webContents.session.webRequest,
     resolveMainRendererServerAccess,

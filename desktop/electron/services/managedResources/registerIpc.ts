@@ -12,6 +12,7 @@ import { z } from 'zod'
 import {
   BaseIpcPayloadSchema,
   ConceptInputSchema,
+  CopyTagConnectionsInputSchema,
   DeleteConceptInputSchema,
   DeleteApplicationInputSchema,
   DeleteResourceInputSchema,
@@ -84,6 +85,7 @@ import {
 import type { DataConnectionRuntime } from './dataConnectionRuntime.js'
 import type { DataBrowserService } from './dataBrowserService.js'
 import type { CredentialRevealAuthorizer } from './windowsCredentialReauth.js'
+import { createCopyTagHostConnections, type TagConnectionsClipboard } from './copyTagHostConnections.js'
 
 export const MANAGED_RESOURCES_IPC_CHANNELS = {
   getCapabilities: 'desktop:managed-resources:get-capabilities',
@@ -99,6 +101,7 @@ export const MANAGED_RESOURCES_IPC_CHANNELS = {
   saveCredential: 'desktop:managed-resources:save-credential',
   deleteCredential: 'desktop:managed-resources:delete-credential',
   revealCredential: 'desktop:managed-resources:reveal-credential',
+  copyTagConnections: 'desktop:managed-resources:copy-tag-connections',
   provideTemporaryCredential: 'desktop:managed-resources:provide-temporary-credential',
   listConcepts: 'desktop:managed-resources:list-concepts',
   getConcept: 'desktop:managed-resources:get-concept',
@@ -183,6 +186,7 @@ export type RegisterManagedResourcesIpcOptions = {
   services: ManagedResourcesServices
   expectedOwnerId?: string
   dialogService?: ManagedResourcesDialogService
+  clipboard?: TagConnectionsClipboard
   contextTicketClient?: ContextTicketClient
 }
 
@@ -686,6 +690,19 @@ export function registerManagedResourcesIpc(options: RegisterManagedResourcesIpc
       references: enriched,
     })
   })
+
+  const copyTagConnections = createCopyTagHostConnections({
+    store: services.store,
+    vault: services.vault,
+    credentialRevealAuthorizer: services.credentialRevealAuthorizer,
+    clipboard: options.clipboard,
+  })
+  const copyTagConnectionsSchema = { safeParse: (value: unknown) => {
+    const { ownerId: _ownerId, ...input } = value as Record<string, unknown>
+    return CopyTagConnectionsInputSchema.safeParse(input)
+  } }
+  handle(MANAGED_RESOURCES_IPC_CHANNELS.copyTagConnections, copyTagConnectionsSchema, async (event, payload) =>
+    copyTagConnections(payload.tagId, () => validateCaller(event, payload) === null))
 
   // Reveal password credential. The renderer never supplies an OS password:
   // Windows re-authentication happens in a separate native prompt boundary, and

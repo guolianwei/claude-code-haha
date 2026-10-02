@@ -5,6 +5,7 @@ import assert from 'node:assert/strict'
 import { createNetworkFixture } from '../../../src/features/network-manager/testing/networkFixture'
 import { ELECTRON_IPC_CHANNELS } from '../../../electron/ipc/channels'
 import { NetworkRequestSchema } from '../../../src/features/network-manager/networkSchemas'
+import type { NetworkProbe } from '../../../src/features/network-manager/networkTypes'
 
 const sandbox = process.env.NETWORK_SMOKE_SANDBOX
 const output = process.env.NETWORK_SMOKE_OUTPUT
@@ -12,6 +13,9 @@ if (!sandbox || !output) throw new Error('Isolated fixture paths are required')
 app.setPath('userData', path.join(sandbox, 'electron-user-data'))
 app.setName('cc-haha-network-isolated-fixture')
 const fixture = createNetworkFixture()
+let endpointLatencyMs = 4
+fixture.probe.detail = 'TCP_CONNECTED'
+fixture.snapshot.interfaces[0]!.alias = '家庭 Wi-Fi（模拟）'
 const discovered = { pid: 102, startedAt: '2026-09-27T01:00:00Z', executablePath: 'C:\\Fixture\\SakuraCat\\com.vortex.helper.exe',
   clientExecutable: 'C:\\Fixture\\SakuraCat\\SakuraCat.exe', configPath: 'C:\\Fixture\\SakuraCat\\active.yaml',
   controller: '127.0.0.1:39798', listeningPorts: [7897, 39798], configSource: 'process-argument' as const }
@@ -19,24 +23,43 @@ Object.assign(fixture.discovery, { status: 'detected', running: true, selected: 
 fixture.snapshot.selectedRoutes = [{ target: '191.168.7.62', source: '162.168.1.2', interfaceIndex: 47,
   interfaceAlias: '124.114.142.77', prefix: '191.168.0.0/16', nextHop: '0.0.0.0' }]
 fixture.snapshot.proxy.bypassPrefixes = ['191.168.0.0/16', '10.0.0.0/8']
+Object.assign(fixture.snapshot.vpn, { name: '124.114.142.77', serverAddress: '124.114.142.77', status: 'present' })
+fixture.snapshot.selectedRoutes.push({ target: '10.204.19.81', source: '10.78.62.2', interfaceIndex: 52, interfaceAlias: 'zjwj-arm62', prefix: '10.204.19.0/24', nextHop: '0.0.0.0' })
+Object.assign(fixture.snapshot.tunnel, { serviceStatus: 'present', taskStatus: 'present', relayReady: false, udpListening: false, tcpConnected: false, processPriority: 'Normal', readinessIssues: ['RELAY_NOT_READY'] })
+fixture.api.verifyStep = async (profile, step) => {
+  fixture.calls.push({ action: 'verifyStep', input: { profile, step } })
+  const common = { ok: true, checkedAt: fixture.snapshot.collectedAt, latencyMs: 4, detail: 'TCP_CONNECTED' }
+  let probes: NetworkProbe[]
+  if (['physical', 'vpn', 'management'].includes(step)) probes = [{ ...common, kind: 'tcp', target: profile.gatewayAddress, port: profile.gatewayPort, source: '162.168.1.2' }]
+  else if (step === 'relay') probes = [
+    { ...common, kind: 'relay', target: `127.0.0.1:${profile.relayLocalPort}`, ok: fixture.snapshot.tunnel.relayReady === true, detail: fixture.snapshot.tunnel.relayReady ? 'RELAY_READY' : 'RELAY_NOT_READY' },
+    { ...common, kind: 'tcp', target: profile.gatewayAddress, port: profile.relayPort, source: '162.168.1.2' },
+  ]
+  else if (step === 'tunnel') probes = [{ ...common, kind: 'handshake', target: profile.tunnelName, source: profile.tunnelAddress, detail: 'WIREGUARD_AUTHENTICATED_PATH' }]
+  else if (step === 'proxy') probes = [{ ...common, kind: 'http-proxy', target: profile.externalProbeUrl, statusCode: 204, detail: 'EXPLICIT_PROXY_HTTP_RESPONSE', latencyMs: endpointLatencyMs }]
+  else probes = profile.verificationTargets.map(target => ({ ...common, kind: target.protocol === 'tcp' ? 'tcp' : 'http-direct', target: target.protocol === 'tcp' ? target.address : `${target.protocol}://${target.address}:${target.port}/`, port: target.port, statusCode: target.protocol === 'tcp' ? undefined : 200, source: profile.tunnelAddress, detail: target.protocol === 'tcp' ? 'TCP_CONNECTED' : 'DIRECT_HTTP_RESPONSE', latencyMs: endpointLatencyMs }))
+  return { ok: true, data: probes }
+}
 const steps: string[] = []
 let win: BrowserWindow
 let stage = 'startup'
 const timeout = setTimeout(() => app.exit(2), 120_000)
 const hostId = '00000000-0000-4000-8000-000000000001'
-ipcMain.handle(ELECTRON_IPC_CHANNELS.mrListHosts, async () => ({ ok: true, data: [{ id: hostId, name: 'Fixture server', address: 'fixture.invalid', port: 22, username: 'fixture', auth: { type: 'password', credentialId: null }, tagIds: [], initialDirectory: null, applications: [], notes: '', revision: 1, createdAt: '', updatedAt: '' }] }))
+ipcMain.handle(ELECTRON_IPC_CHANNELS.mrListHosts, async () => ({ ok: true, data: [{ id: hostId, name: '模拟管理主机', address: 'fixture.invalid', port: 22, username: 'fixture', auth: { type: 'password', credentialId: null }, tagIds: [], initialDirectory: null, applications: [], notes: '', revision: 1, createdAt: '', updatedAt: '' }] }))
 ipcMain.handle(ELECTRON_IPC_CHANNELS.networkManager, async (_event, payload) => {
   const request = NetworkRequestSchema.parse(payload)
   switch (request.action) {
     case 'discoverProxy': return fixture.api.discoverProxy(request.proxyPort)
     case 'executionCatalog': return fixture.api.executionCatalog()
     case 'openNetworkConnections': return fixture.api.openNetworkConnections()
+    case 'openSystemTool': return fixture.api.openSystemTool(request.target)
     case 'list': return fixture.api.list()
     case 'save': return fixture.api.save(request.profile, request.expectedRevision)
     case 'inspect': return fixture.api.inspect(request.profile)
     case 'plan': return fixture.api.plan(request.profile)
     case 'apply': return fixture.api.apply(request.planId)
     case 'verify': return fixture.api.verify(request.profile)
+    case 'verifyStep': return fixture.api.verifyStep(request.profile, request.step)
     case 'probeHost': return fixture.api.probeHost(request.hostId)
     case 'login': return fixture.api.login(request.target, request.profile)
     case 'recover': return fixture.api.recover()
@@ -74,6 +97,11 @@ async function click(expression: string) {
 async function key(key: string, code: string, windowsVirtualKeyCode: number, modifiers = 0) {
   await win.webContents.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyDown', key, code, windowsVirtualKeyCode, modifiers })
   await win.webContents.debugger.sendCommand('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode, modifiers })
+}
+async function fill(label: string, value: string) {
+  await click(field(label))
+  await key('a', 'KeyA', 65, 2)
+  await win.webContents.debugger.sendCommand('Input.insertText', { text: value })
 }
 async function screenshot(name: string) {
   await win.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
@@ -153,7 +181,7 @@ void app.whenReady().then(async () => {
     stage = 'edit and save through native IPC'
     await click(field('Profile name'))
     await key('a', 'KeyA', 65, 2)
-    await win.webContents.debugger.sendCommand('Input.insertText', { text: 'Office fixture' })
+    await win.webContents.debugger.sendCommand('Input.insertText', { text: '办公网络（模拟）' })
     await click(button('Save profile'))
     await waitFor(`document.body.textContent.includes('Profile saved; not applied.')`)
     assert.equal(fixture.calls.filter(call => call.action === 'save').length, 1)
@@ -172,10 +200,58 @@ void app.whenReady().then(async () => {
     await key('Enter', 'Enter', 13)
     await waitFor(`(${field('Choose a managed host')}).value === ${JSON.stringify(hostId)}`)
     await click(button('Test host TCP port'))
-    await waitFor(`document.body.textContent.includes('Fixture TCP connected')`)
+    await waitFor(`document.body.textContent.includes('TCP_CONNECTED')`)
     assert.equal(fixture.calls.find(call => call.action === 'probeHost')?.input, hostId)
     await win.webContents.executeJavaScript(`(${button('Test host TCP port')}).scrollIntoView({block:'end',behavior:'instant'})`)
     await screenshot('04-probe.png')
+    steps.push(stage)
+    stage = 'layered path diagram and exact step checks'
+    await click(button('Home network'))
+    await click(button('Validate physical network'))
+    await waitFor(`document.querySelector('[data-testid="network-path-gateway"]').dataset.state === 'ready'`)
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-testid="network-path-relay"]').dataset.state`), 'failed')
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-testid="network-path-remote-network"]').dataset.state`), 'unknown')
+    await click(`document.querySelector('[data-testid="network-path-relay"] button')`)
+    await waitFor(`document.querySelector('[data-testid="network-stage-containers"]').getAttribute('aria-current') === 'step'`)
+    await click(button('Check relay readiness'))
+    await waitFor(`document.querySelector('[data-testid="network-path-relay"]').dataset.state === 'failed'`)
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-testid="recovery-task"]').textContent.includes('Confirmed')`), true)
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-testid="recovery-relay"]').textContent.includes('Needs attention')`), true)
+    await win.webContents.executeJavaScript(`document.querySelector('[data-testid="network-path-physical"]').closest('section').parentElement.scrollIntoView({block:'start',behavior:'instant'})`)
+    await screenshot('10-path-relay-failed.png')
+    Object.assign(fixture.snapshot.tunnel, { relayReady: true, udpListening: true, tcpConnected: true, readinessIssues: [] })
+    await click(button('Check relay readiness'))
+    await waitFor(`document.querySelector('[data-testid="network-path-relay"]').dataset.state === 'ready'`)
+    await click(button('Check tunnel route and handshake'))
+    await waitFor(`document.querySelector('[data-testid="network-path-wireguard"]').dataset.state === 'ready'`)
+    await click(button('Open Task Scheduler'))
+    await waitFor(`!(${button('Open Task Scheduler')}).disabled`)
+    assert.equal(fixture.calls.filter(call => call.action === 'openSystemTool' && call.input === 'tasks').length, 1)
+    assert.deepEqual(fixture.calls.filter(call => call.action === 'verifyStep').map(call => (call.input as { step: string }).step), ['physical', 'relay', 'relay', 'tunnel'])
+    steps.push(stage)
+    stage = 'manual HTTP service endpoint without a managed login host'
+    await click(`document.querySelector('[data-testid="network-path-target-legacy-target"] button')`)
+    await waitFor(`document.querySelector('[data-testid="network-stage-verify"]').getAttribute('aria-current') === 'step'`)
+    await click(button('Add service endpoint'))
+    await fill('Target label', '工作台（模拟）')
+    await fill('Target IPv4 address', '10.204.19.81')
+    await fill('Service port', '8080')
+    await click(button('Save profile'))
+    await waitFor(`document.body.textContent.includes('Profile saved; not applied.')`)
+    const savedEndpoint = (fixture.calls.filter(call => call.action === 'save').at(-1)?.input as { profile: { verificationTargets: Array<{ label: string; address: string; port: number; protocol: string }> } }).profile.verificationTargets[0]!
+    assert.deepEqual({ label: savedEndpoint.label, address: savedEndpoint.address, port: savedEndpoint.port, protocol: savedEndpoint.protocol }, { label: '工作台（模拟）', address: '10.204.19.81', port: 8080, protocol: 'http' })
+    await click(button('Check relay readiness'))
+    await click(button('Check tunnel route and handshake'))
+    await click(button('Check configured service endpoints'))
+    await waitFor(`Array.from(document.querySelectorAll('[data-testid^="network-path-target-"]')).some(e => e.textContent.includes('工作台（模拟）') && e.dataset.state === 'ready' && e.textContent.includes('HTTP 200'))`)
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-testid="recovery-business"]').textContent.includes('Confirmed')`), true)
+    assert.equal(await win.webContents.executeJavaScript(`document.querySelector('[data-testid="network-path-remote-network"]').dataset.state`), 'unknown')
+    assert.equal(fixture.calls.filter(call => call.action === 'probeHost').length, 1)
+    assert.equal((fixture.calls.filter(call => call.action === 'verifyStep').at(-1)?.input as { step: string }).step, 'container')
+    await win.webContents.executeJavaScript(`(${button('Check configured service endpoints')}).scrollIntoView({block:'center',behavior:'instant'})`)
+    await screenshot('11-manual-http-target.png')
+    await win.webContents.executeJavaScript(`document.querySelector('[data-testid="network-path-physical"]').closest('section').parentElement.scrollIntoView({block:'start',behavior:'instant'})`)
+    await screenshot('12-path-service-verified.png')
     steps.push(stage)
     stage = 'themes'
     for (const theme of ['white', 'light', 'dark']) {
@@ -186,6 +262,41 @@ void app.whenReady().then(async () => {
     stage = 'Chinese locale'
     await win.webContents.executeJavaScript("document.documentElement.dataset.theme = 'white'; window.setNetworkFixtureLocale('zh')")
     await waitFor(`!!(${button('验证主机 TCP 端口')})`)
+    await click(button('校验宿主地址与 TCP 端口'))
+    await click(button('校验代理'))
+    await click(button('校验转发就绪'))
+    await click(button('校验隧道路由与握手'))
+    await click(button('校验已配置业务端点'))
+    await waitFor(`document.querySelector('[data-testid="network-path-relay"]').dataset.state === 'ready' && document.querySelector('[data-testid="network-path-wireguard"]').dataset.state === 'ready'`)
+    await win.webContents.executeJavaScript(`document.querySelector('[data-testid="network-path-physical"]').closest('section').parentElement.scrollIntoView({block:'start',behavior:'instant'})`)
+    await screenshot('13-path-verified-zh.png')
+    Object.assign(fixture.snapshot.tunnel, { relayReady: false, udpListening: false, tcpConnected: false, readinessIssues: ['RELAY_NOT_READY'] })
+    await click(button('校验转发就绪'))
+    await waitFor(`document.querySelector('[data-testid="network-path-relay"]').dataset.state === 'failed'`)
+    await win.webContents.executeJavaScript(`document.querySelector('[data-testid="network-path-physical"]').closest('section').parentElement.scrollIntoView({block:'start',behavior:'instant'})`)
+    await screenshot('14-path-relay-failed-zh.png')
+    await click(`document.querySelector('[data-testid="network-path-relay"] button')`)
+    await waitFor(`document.querySelector('[data-testid="network-stage-containers"]').getAttribute('aria-current') === 'step'`)
+    await win.webContents.executeJavaScript(`(${field('已有转发程序路径')}).scrollIntoView({block:'start',behavior:'instant'})`)
+    await screenshot('15-relay-guidance-zh.png')
+    Object.assign(fixture.snapshot.tunnel, { relayReady: true, udpListening: true, tcpConnected: true, readinessIssues: [] })
+    await click(button('校验转发就绪'))
+    await click(button('校验隧道路由与握手'))
+    await click(button('校验已配置业务端点'))
+    await waitFor(`Array.from(document.querySelectorAll('h3')).some(e => e.textContent === '6 · 验证业务连通性')`)
+    await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('h3')).find(e => e.textContent === '6 · 验证业务连通性').scrollIntoView({block:'start',behavior:'instant'})`)
+    await screenshot('16-business-endpoints-zh.png')
+    endpointLatencyMs = 650
+    await click(button('校验代理'))
+    await click(button('校验已配置业务端点'))
+    await waitFor(`Array.from(document.querySelectorAll('[data-testid^="network-path-target-"]')).some(e => e.textContent.includes('工作台（模拟）') && e.dataset.state === 'slow' && e.textContent.includes('650 ms') && e.textContent.includes('可达，但延迟较大'))`)
+    assert.equal(await win.webContents.executeJavaScript(`Array.from(document.querySelectorAll('[data-testid^="network-path-link-"]')).some(e => e.dataset.state === 'slow' && e.querySelector('svg [data-path="line"]') && e.querySelector('svg [data-path="arrow"]'))`), true)
+    await win.webContents.executeJavaScript(`document.querySelector('[data-testid="network-path-target-branches"]').parentElement.scrollIntoView({block:'center',behavior:'instant'})`)
+    await screenshot('17-high-latency-zh.png')
+    endpointLatencyMs = 4
+    await click(button('校验代理'))
+    await click(button('校验已配置业务端点'))
+    await waitFor(`Array.from(document.querySelectorAll('[data-testid^="network-path-target-"]')).some(e => e.textContent.includes('工作台（模拟）') && e.dataset.state === 'ready')`)
     await win.webContents.executeJavaScript(`(${button('验证主机 TCP 端口')}).scrollIntoView({block:'end',behavior:'instant'})`)
     await screenshot('06-probe-zh.png')
     await click(button('关闭网络配置'))

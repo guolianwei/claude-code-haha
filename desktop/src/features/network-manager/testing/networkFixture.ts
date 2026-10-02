@@ -2,7 +2,7 @@ import type { SakuraDiscovery } from '../networkTypes'
 import { createDefaultNetworkProfiles, type NetworkManagerApi, type NetworkPlan, type NetworkProbe, type NetworkProfilesDocument, type NetworkSnapshot, type VpnRouteBatchPlan, type VpnRoutePlan } from '../networkTypes'
 
 export function createNetworkFixture() {
-  let document: NetworkProfilesDocument = { schemaVersion: 1, revision: 1, profiles: createDefaultNetworkProfiles() }
+  let document: NetworkProfilesDocument = { schemaVersion: 2, revision: 1, profiles: createDefaultNetworkProfiles() }
   const calls: Array<{ action: string; input?: unknown }> = []
   const snapshot: NetworkSnapshot = {
     id: 'fixture-snapshot', collectedAt: '2026-09-25T02:00:00.000Z', platform: 'win32', elevated: true,
@@ -44,6 +44,7 @@ export function createNetworkFixture() {
     async discoverProxy(proxyPort) { calls.push({ action: 'discoverProxy', input: proxyPort }); return { ok: true, data: { ...structuredClone(discovery), proxyPort } } },
     async executionCatalog() { calls.push({ action: 'executionCatalog' }); return { ok: true, data: { executor: 'Isolated fixture executor', actions: [{ id: 'snapshot', kind: 'read', source: 'fixture/powershell.ts', functionName: 'runNetworkPowerShell', script: 'Get-NetIPInterface # fixture only' }, { id: 'proxyDiscover', kind: 'read', source: 'fixture/powershell.ts', functionName: 'Get-SakuraProcesses', script: 'Get-CimInstance Win32_Process # fixture only' }] } } },
     async openNetworkConnections() { calls.push({ action: 'openNetworkConnections' }); return { ok: true, data: null } },
+    async openSystemTool(target) { calls.push({ action: 'openSystemTool', input: target }); return { ok: true, data: null } },
     async list() { calls.push({ action: 'list' }); return { ok: true, data: structuredClone(document) } },
     async save(profile, expectedRevision) {
       calls.push({ action: 'save', input: { profile, expectedRevision } })
@@ -55,6 +56,7 @@ export function createNetworkFixture() {
     async plan(profile) { calls.push({ action: 'plan', input: profile }); return { ok: true, data: { snapshot: structuredClone(snapshot), plan: { ...structuredClone(plan), profileId: profile.id } } } },
     async apply(planId) { calls.push({ action: 'apply', input: planId }); return { ok: true, data: { planId, status: 'applied', completedChanges: ['vpn-split'], rollback: [], probes: [], issues: [] } } },
     async verify(profile) { calls.push({ action: 'verify', input: profile }); return { ok: true, data: [structuredClone(probe)] } },
+    async verifyStep(profile, step) { calls.push({ action: 'verifyStep', input: { profile, step } }); return { ok: true, data: [structuredClone(probe)] } },
     async probeHost(hostId) { calls.push({ action: 'probeHost', input: hostId }); return { ok: true, data: { ...structuredClone(probe), hostId } } },
     async login(target, profile) { calls.push({ action: 'login', input: { target, profile } }); return { ok: true, data: null } },
     async recover() { calls.push({ action: 'recover' }); return { ok: true, data: { planId: plan.id, status: 'rolled-back', completedChanges: [], rollback: ['vpn-split restored'], probes: [], issues: [] } } },

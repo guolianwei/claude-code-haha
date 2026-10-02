@@ -5,6 +5,8 @@ export type NetworkProfile = {
   mode: 'home' | 'work'
   vpnName: string
   vpnScope: 'allUsers' | 'currentUser'
+  vpnServerAddress: string
+  splitTunnelingPolicy: 'preserve' | 'enabled'
   managementPrefix: string
   gatewayAddress: string
   gatewayPort: number
@@ -21,7 +23,14 @@ export type NetworkProfile = {
   relayPort: number
   /** Expected outer source already authorized at the server; never an ACL wildcard. */
   expectedRelaySource: string
+  relayExecutable: string
+  relayLocalPort: number
+  tunnelAddress: string
+  readinessTimeoutSeconds: number
+  verificationTargets: NetworkVerificationTarget[]
 }
+
+export type NetworkVerificationTarget = { id: string; label: string; address: string; port: number; protocol: 'tcp' | 'http' | 'https' }
 
 export type SakuraInstance = {
   pid: number
@@ -56,7 +65,7 @@ export type NetworkPlanExecution = {
   inverse: Record<string, unknown> | null
 }
 
-export type NetworkProfilesDocument = { schemaVersion: 1; revision: number; profiles: NetworkProfile[] }
+export type NetworkProfilesDocument = { schemaVersion: 2; revision: number; profiles: NetworkProfile[] }
 export type NetworkInterface = { index: number; alias: string; physical: boolean; connected: boolean; addresses: string[]; metric: number }
 export type NetworkRoute = { prefix: string; nextHop: string; interfaceIndex: number; interfaceAlias: string; metric: number; store: 'active' | 'persistent' }
 export type SelectedNetworkRoute = { target: string; source: string; interfaceIndex: number; interfaceAlias: string; prefix: string; nextHop: string }
@@ -68,9 +77,12 @@ export type NetworkSnapshot = {
   interfaces: NetworkInterface[]
   routes: NetworkRoute[]
   selectedRoutes: SelectedNetworkRoute[]
-  vpn: { exists: boolean; connected: boolean; splitTunneling: boolean; routePrefixes: string[] }
+  vpn: { exists: boolean; connected: boolean; splitTunneling: boolean; routePrefixes: string[]; name?: string; serverAddress?: string; scope?: string; status?: 'present' | 'missing' | 'ambiguous' | 'unknown' }
   proxy: { available: boolean; mode: string; tunEnabled: boolean; controller: string; bypassPrefixes: string[]; configHash: string; instanceId?: string }
-  tunnel: { serviceExists: boolean; running: boolean; taskExists: boolean; taskRunning: boolean; taskEnabled: boolean; latestHandshake: number | null }
+  tunnel: { serviceExists: boolean; running: boolean; taskExists: boolean; taskRunning: boolean; taskEnabled: boolean; latestHandshake: number | null;
+    serviceStatus?: 'present' | 'missing' | 'unknown'; taskStatus?: 'present' | 'missing' | 'unknown'; startupType?: string;
+    relayReady?: boolean; udpListening?: boolean; tcpConnected?: boolean; processPriority?: string; readinessIssues?: string[];
+    receivedBytes?: number; sentBytes?: number; binaryHash?: string; taskDefinitionMatches?: boolean }
   issues: string[]
 }
 
@@ -83,7 +95,7 @@ export type NetworkStep = {
   details: string[]
 }
 export type NetworkChange = {
-  id: 'vpn-split' | 'vpn-route' | 'proxy-bypass' | 'relay-start' | 'tunnel-start' | 'office-route' | 'tunnel-stop' | 'relay-stop'
+  id: 'vpn-split' | 'vpn-route' | 'proxy-bypass' | 'relay-start' | 'relay-register' | 'tunnel-start' | 'office-route' | 'tunnel-stop' | 'relay-stop'
   before: string
   after: string
 }
@@ -102,7 +114,7 @@ export type NetworkPlan = {
 export type NetworkProbe = {
   target: string
   port?: number
-  kind: 'tcp' | 'http-proxy' | 'http-direct' | 'route' | 'handshake'
+  kind: 'tcp' | 'http-proxy' | 'http-direct' | 'route' | 'handshake' | 'relay' | 'service'
   ok: boolean
   checkedAt: string
   latencyMs: number
@@ -121,7 +133,7 @@ export type NetworkApplyReport = {
   issues: string[]
 }
 export type VpnRouteTarget = { destination: string; vpnName: string; vpnScope: 'allUsers' | 'currentUser' }
-export type VpnRouteOptions = { vpns: { name: string; scope: 'allUsers' | 'currentUser'; connected: boolean; splitTunneling: boolean; routes: { prefix: string; metric: number }[] }[] }
+export type VpnRouteOptions = { vpns: { name: string; scope: 'allUsers' | 'currentUser'; serverAddress?: string; connected: boolean; splitTunneling: boolean; routes: { prefix: string; metric: number }[] }[] }
 export type VpnRouteSelection = { target: string; source: string; interfaceAlias: string; prefix: string }
 export type VpnRoutePlan = VpnRouteTarget & {
   id: string
@@ -143,6 +155,7 @@ export type NetworkRequest =
   | { action: 'discoverProxy'; proxyPort: number }
   | { action: 'executionCatalog' }
   | { action: 'openNetworkConnections' }
+  | { action: 'openSystemTool'; target: 'tasks' | 'services' }
   | { action: 'list' }
   | { action: 'save'; profile: NetworkProfile; expectedRevision: number }
   | { action: 'inspect'; profile: NetworkProfile }
@@ -150,6 +163,7 @@ export type NetworkRequest =
   | { action: 'apply'; planId: string }
   | { action: 'recover' }
   | { action: 'verify'; profile: NetworkProfile }
+  | { action: 'verifyStep'; profile: NetworkProfile; step: NetworkStepId }
   | { action: 'probeHost'; hostId: string }
   | { action: 'login'; target: 'vpn' | 'sakura'; profile: NetworkProfile }
   | { action: 'vpnRouteOptions' }
@@ -166,6 +180,7 @@ export type NetworkManagerApi = {
   executionCatalog(): Promise<NetworkResult<NetworkExecutionCatalog>>
   /** Opens ncpa.cpl only; no profile input, elevation or network mutation. */
   openNetworkConnections(): Promise<NetworkResult<null>>
+  openSystemTool(target: 'tasks' | 'services'): Promise<NetworkResult<null>>
   list(): Promise<NetworkResult<NetworkProfilesDocument>>
   save(profile: NetworkProfile, expectedRevision: number): Promise<NetworkResult<NetworkProfilesDocument>>
   inspect(profile: NetworkProfile): Promise<NetworkResult<NetworkSnapshot>>
@@ -173,6 +188,7 @@ export type NetworkManagerApi = {
   apply(planId: string): Promise<NetworkResult<NetworkApplyReport>>
   recover(): Promise<NetworkResult<NetworkApplyReport>>
   verify(profile: NetworkProfile): Promise<NetworkResult<NetworkProbe[]>>
+  verifyStep(profile: NetworkProfile, step: NetworkStepId): Promise<NetworkResult<NetworkProbe[]>>
   probeHost(hostId: string): Promise<NetworkResult<NetworkProbe>>
   login(target: 'vpn' | 'sakura', profile: NetworkProfile): Promise<NetworkResult<null>>
   vpnRouteOptions(): Promise<NetworkResult<VpnRouteOptions>>
@@ -207,6 +223,7 @@ export function proxyBypassCovers(prefixes: string[], target: string): boolean {
 export function createDefaultNetworkProfiles(): [NetworkProfile, NetworkProfile] {
   const base = {
     vpnName: '124.114.142.77', vpnScope: 'allUsers' as const,
+    vpnServerAddress: '124.114.142.77', splitTunnelingPolicy: 'preserve' as const,
     managementPrefix: '191.168.0.0/16', gatewayAddress: '191.168.7.62', gatewayPort: 22,
     proxyConfigPath: '', sakuraExecutable: '', proxyPort: 7897,
     externalProbeUrl: 'https://www.google.com/generate_204',
@@ -214,6 +231,8 @@ export function createDefaultNetworkProfiles(): [NetworkProfile, NetworkProfile]
     containerProbeAddress: '10.204.19.81', containerProbePort: 8080,
     tunnelName: 'zjwj-arm62', relayTaskName: 'Zjwj Arm62 WireGuard TCP Relay', relayPort: 51826,
     expectedRelaySource: '162.168.1.2',
+    relayExecutable: 'C:\\ProgramData\\WireGuard\\zjwj-arm62\\wg-relay.exe', relayLocalPort: 51824,
+    tunnelAddress: '10.78.62.2', readinessTimeoutSeconds: 60, verificationTargets: [],
   }
   return [
     { ...base, id: 'home', name: '', mode: 'home' },

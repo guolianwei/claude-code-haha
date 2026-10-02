@@ -7,7 +7,7 @@ import { SegmentedControl } from '@/components/ui/SegmentedControl'
 import { useTranslation, type TranslationKey } from '@/i18n'
 import { getDesktopHost } from '@/lib/desktopHost'
 import type { Host } from '@/features/managed-resources/types/resourceTypes'
-import { proxyBypassCovers, type NetworkApplyReport, type NetworkManagerApi, type NetworkPlan, type NetworkProbe, type NetworkProfile, type NetworkProfilesDocument, type NetworkResult, type NetworkSnapshot } from '../networkTypes'
+import { proxyBypassCovers, type NetworkApplyReport, type NetworkManagerApi, type NetworkPlan, type NetworkProbe, type NetworkProfile, type NetworkProfilesDocument, type NetworkResult, type NetworkSnapshot, type NetworkStepId } from '../networkTypes'
 import { NetworkProfileFields, type NetworkProfileStage, type NetworkStageState } from './NetworkProfileFields'
 import { NetworkResults } from './NetworkResults'
 import { VpnRouteBindingPanel } from './VpnRouteBindingPanel'
@@ -15,6 +15,11 @@ import { networkIssueKey } from './networkMessages'
 import { useSakuraDiscovery } from '../useSakuraDiscovery'
 import { effectiveNetworkProfile } from '../executionReference'
 import { NetworkExecutionReference } from './NetworkExecutionReference'
+import { NetworkRecoveryStatus } from './NetworkRecoveryStatus'
+import { VerificationTargets } from './VerificationTargets'
+import { NetworkPathDiagram } from './NetworkPathDiagram'
+import { mergeNetworkProbes, probeBelongsToStep } from './networkEvidence'
+import { isAddressInPrefix } from '../networkSchemas'
 
 type Props = { api: NetworkManagerApi }
 type NetworkManagerStage = NetworkProfileStage | 'plan' | 'verify'
@@ -35,6 +40,9 @@ export function NetworkManagerPanel({ api }: Props) {
   const [draft, setDraft] = useState<NetworkProfile | null>(null)
   const [dirty, setDirty] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [applying, setApplying] = useState(false)
+  const [pollError, setPollError] = useState(false)
+  const applyProfile = useRef<NetworkProfile | null>(null)
   const pending = useRef(false)
   const mounted = useRef(true)
   const [error, setError] = useState('')
@@ -54,11 +62,37 @@ export function NetworkManagerPanel({ api }: Props) {
   const effectiveProfile = draft ? effectiveNetworkProfile(draft, sakura.discovery) : null
   const autoResolved = !!draft && !!effectiveProfile && (draft.proxyConfigPath !== effectiveProfile.proxyConfigPath || draft.sakuraExecutable !== effectiveProfile.sakuraExecutable)
   useEffect(() => {
+    if (!applying || !applyProfile.current) return
+    const profile = applyProfile.current
+    const deadline = Date.now() + (profile.readinessTimeoutSeconds + 30) * 1000
+    let active = true
+    let timer: ReturnType<typeof setTimeout>
+    const deadlineTimer = setTimeout(() => {
+      if (!active || applyProfile.current !== profile) return
+      active = false
+      clearTimeout(timer)
+      setPollError(true)
+    }, Math.max(0, deadline - Date.now()))
+    async function poll() {
+      if (!active || Date.now() >= deadline) return
+      try {
+        const result = await api.inspect(profile)
+        if (!active || applyProfile.current !== profile || Date.now() >= deadline) return
+        setPollError(!result.ok)
+        if (result.ok) setSnapshot(result.data)
+      } catch { if (active) setPollError(true) }
+      if (active && Date.now() < deadline) timer = setTimeout(() => void poll(), 2000)
+    }
+    timer = setTimeout(() => void poll(), 2000)
+    return () => { active = false; clearTimeout(timer); clearTimeout(deadlineTimer) }
+  }, [api, applying, draft?.id])
+  useEffect(() => {
     setSnapshot(null)
     setPlan(null)
     setReport(null)
     setProbes([])
     setStageStates({})
+    setPollError(false)
   }, [sakura.discovery])
 
   function unwrap<T>(result: NetworkResult<T>): T {
@@ -69,6 +103,7 @@ export function NetworkManagerPanel({ api }: Props) {
     return result.data
   }
   function clearEvidence() {
+    setPollError(false)
     setSnapshot(null)
     setPlan(null)
     setReport(null)
@@ -159,7 +194,7 @@ export function NetworkManagerPanel({ api }: Props) {
     { id: 'proxy', label: 'networkManager.proxy' },
     { id: 'containers', label: 'networkManager.containers' },
     { id: 'plan', label: 'networkManager.plan' },
-    { id: 'verify', label: 'networkManager.verify' },
+    { id: 'verify', label: 'networkManager.recovery.verifyTitle' },
   ]
   function stagePasses(stage: Exclude<NetworkProfileStage, 'containers'>, next: NetworkSnapshot) {
     const gatewayRoute = next.selectedRoutes.find(route => route.target === draft?.gatewayAddress)
@@ -167,8 +202,9 @@ export function NetworkManagerPanel({ api }: Props) {
     if (stage === 'vpn') {
       if (draft?.mode === 'work') return Boolean(gatewayRoute)
       return next.vpn.exists && next.vpn.connected
-        && next.vpn.routePrefixes.includes(draft?.managementPrefix ?? '')
-        && gatewayRoute?.interfaceAlias === draft?.vpnName
+        && next.vpn.status !== 'unknown' && next.vpn.status !== 'ambiguous'
+        && (draft?.splitTunnelingPolicy === 'preserve' || next.vpn.splitTunneling && next.vpn.routePrefixes.includes(draft?.managementPrefix ?? ''))
+        && gatewayRoute?.interfaceAlias === (next.vpn.name ?? draft?.vpnName)
     }
     const desiredBypass = [draft?.managementPrefix, ...(draft?.containerEnabled ? [draft.containerPrefix] : [])].filter(Boolean)
     return next.proxy.available && next.proxy.mode === 'rule'
@@ -176,26 +212,29 @@ export function NetworkManagerPanel({ api }: Props) {
   }
 
   async function validateStage(stage: NetworkProfileStage) {
+    await validateLink(stage === 'containers' ? 'container' : stage)
+  }
+
+  async function validateLink(step: NetworkStepId) {
     if (!draft) return
+    setPollError(false)
     setSnapshot(null)
     setPlan(null)
     setReport(null)
-    setProbes([])
+    setProbes(previous => previous.filter(probe => !probeBelongsToStep(probe, step, draft)))
     setNotice('')
     setError('')
     await run(async () => {
-      if (stage === 'containers') {
-        const all = unwrap(await api.verify(effectiveProfile ?? draft))
-        const filtered = all.filter(probe => probe.target === draft.containerProbeAddress
-          || probe.target === draft.tunnelName
-          || (probe.target === draft.gatewayAddress && probe.port === draft.relayPort))
-        setProbes(filtered)
-        setStageStates(previous => ({ ...previous, containers: filtered.length > 0 && filtered.every(probe => probe.ok) ? 'passed' : 'failed' }))
-        return
-      }
+      const checked = unwrap(await api.verifyStep(effectiveProfile ?? draft, step))
+      setProbes(previous => mergeNetworkProbes(previous, checked))
       const next = unwrap(await api.inspect(effectiveProfile ?? draft))
       setSnapshot(next)
-      setStageStates(previous => ({ ...previous, [stage]: stagePasses(stage, next) ? 'passed' : 'failed' }))
+      const stage = step === 'container' ? 'containers' : step === 'management' ? 'physical' : step
+      if (stage === 'physical' || stage === 'vpn' || stage === 'proxy' || stage === 'containers') {
+        const passed = checked.length > 0 && checked.every(probe => probe.ok)
+          && (stage === 'containers' || stagePasses(stage, next))
+        setStageStates(previous => ({ ...previous, [stage]: passed ? 'passed' : 'failed' }))
+      }
     })
   }
 
@@ -211,6 +250,7 @@ export function NetworkManagerPanel({ api }: Props) {
       const next = unwrap(await api.plan(effectiveProfile ?? draft))
       setSnapshot(next.snapshot)
       setPlan(next.plan)
+      selectStage('plan')
     })
   }
   async function login(target: 'vpn' | 'sakura') {
@@ -227,9 +267,12 @@ export function NetworkManagerPanel({ api }: Props) {
   if (!document || !draft) return <div className="space-y-3 text-sm">
     {error ? <p role="alert" className="text-[var(--color-error)]">{error}</p> : <p>{t('networkManager.loading')}</p>}
   </div>
+  const selectedHost = hosts.find(host => host.id === hostId)
+  const canImportHost = selectedHost && isAddressInPrefix(selectedHost.address, draft.containerEnabled ? draft.containerPrefix : '0.0.0.0/0')
 
   return <div className="space-y-4 text-[var(--color-text-primary)]" data-testid="network-manager-panel" aria-busy={busy}>
     <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">{t('networkManager.intro')}</p>
+    <p className="rounded-[var(--radius-lg)] bg-[var(--color-surface-container-low)] p-3 text-sm leading-relaxed">{t('networkManager.recovery.workflow')}</p>
     <div className="flex flex-wrap items-end gap-3">
       <SelectField label={t('networkManager.profile')} value={draft.id} size="md" disabled={busy}
         containerClassName="min-w-48 flex-1"
@@ -248,6 +291,8 @@ export function NetworkManagerPanel({ api }: Props) {
         onChange={mode => edit({ ...draft, mode })} />
     </div>
     <NetworkExecutionReference api={api} stage="profile" profile={effectiveProfile ?? draft} extra={{ expectedRevision: document.revision }} />
+    <NetworkRecoveryStatus profile={draft} snapshot={snapshot} probes={probes} applying={applying} pollError={pollError} />
+    <NetworkPathDiagram profile={draft} snapshot={snapshot} probes={probes} onNavigate={selectStage} />
     <div className="grid gap-4 lg:grid-cols-[248px_minmax(0,1fr)]">
       <nav className="h-fit overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-surface-container-low)] p-2 lg:sticky lg:top-0"
         aria-label={t('networkManager.stages')}>
@@ -273,6 +318,7 @@ export function NetworkManagerPanel({ api }: Props) {
       <div className="min-w-0 space-y-4 pb-[45vh]">
         <NetworkProfileFields profile={draft} disabled={busy} previewDisabled={dirty || sakura.detecting}
           api={api} effectiveProfile={effectiveProfile ?? draft} sakura={sakura}
+          snapshot={snapshot} probes={probes} plan={plan}
           activeStage={isProfileStage(activeStage) ? activeStage : undefined}
           stageStates={stageStates}
           registerSection={registerStageSection}
@@ -280,6 +326,9 @@ export function NetworkManagerPanel({ api }: Props) {
           onChange={edit}
           onLogin={target => void login(target)}
           onValidate={stage => void validateStage(stage)}
+          onValidateLink={step => void validateLink(step)}
+          onOpenSystemTool={target => void run(async () => { unwrap(await api.openSystemTool(target)) })}
+          onNavigate={selectStage}
           onPreview={stage => void previewStage(stage)}
           vpnRoutePanel={<VpnRouteBindingPanel api={api} disabled={busy} profile={effectiveProfile ?? draft}
             defaultVpnName={draft.vpnName} defaultVpnScope={draft.vpnScope} />}
@@ -300,6 +349,7 @@ export function NetworkManagerPanel({ api }: Props) {
           })}>{t('networkManager.save')}</Button>
           <Badge tone={dirty ? 'warning' : 'neutral'} wrap>{t(dirty ? 'networkManager.dirty' : 'networkManager.configured')}</Badge>
         </div>
+        <p className="text-xs text-[var(--color-text-secondary)]">{t('networkManager.recovery.saveFirst')}</p>
 
         <section ref={node => registerStageSection('plan', node)} className={stageSectionClass('plan')} onFocusCapture={() => setActiveStage('plan')}>
           <h3 className="text-sm font-semibold">{t('networkManager.plan')}</h3>
@@ -323,10 +373,24 @@ export function NetworkManagerPanel({ api }: Props) {
               setPlan(null)
               setReport(null)
               setProbes([])
-              const next = unwrap(await api.apply(planId))
-              setReport(next)
-              setProbes(next.probes)
-              setNotice(t(next.status === 'applied' ? 'networkManager.applied' : next.status === 'rolled-back' ? 'networkManager.rolledBack' : next.status === 'rollback-conflict' ? 'networkManager.rollbackConflict' : 'networkManager.failed'))
+              applyProfile.current = effectiveProfile ?? draft
+              setPollError(false)
+              setApplying(true)
+              try {
+                const next = unwrap(await api.apply(planId))
+                if (!mounted.current) return
+                setReport(next)
+                setProbes(next.probes)
+                setNotice(t(next.status === 'applied' ? 'networkManager.applied' : next.status === 'rolled-back' ? 'networkManager.rolledBack' : next.status === 'rollback-conflict' ? 'networkManager.rollbackConflict' : 'networkManager.failed'))
+              } finally {
+                if (mounted.current) setApplying(false)
+                applyProfile.current = null
+              }
+              const finalSnapshot = await api.inspect(effectiveProfile ?? draft)
+              if (mounted.current) {
+                setPollError(!finalSnapshot.ok)
+                if (finalSnapshot.ok) setSnapshot(finalSnapshot.data)
+              }
             })}>{t('networkManager.apply')}</Button>
             {snapshot?.issues.some(issue => issue.includes('RECOVERY_REQUIRED')) && <Button size="sm" variant="secondary" disabled={busy} onClick={() => void run(async () => {
               const next = unwrap(await api.recover())
@@ -347,7 +411,8 @@ export function NetworkManagerPanel({ api }: Props) {
         <NetworkResults snapshot={snapshot} plan={plan} report={report} probes={probes} />
 
         <section ref={node => registerStageSection('verify', node)} className={stageSectionClass('verify')} onFocusCapture={() => setActiveStage('verify')}>
-          <h3 className="text-sm font-semibold">{t('networkManager.verify')}</h3>
+          <h3 className="text-sm font-semibold">{t('networkManager.recovery.verifyTitle')}</h3>
+          <VerificationTargets profile={draft} disabled={busy} onChange={edit} onVerify={() => void validateLink('container')} />
           <p className="text-xs text-[var(--color-text-secondary)]">{t('networkManager.verifyHint')}</p>
           {hostError ? <p role="alert" className="text-sm text-[var(--color-error)]">{t('networkManager.hostError')}</p> : !hosts.length && <p className="text-sm">{t('networkManager.noHosts')}</p>}
           <SelectField label={t('networkManager.host')} value={hostId} disabled={busy || hostError} size="md"
@@ -359,6 +424,10 @@ export function NetworkManagerPanel({ api }: Props) {
               setProbes([unwrap(await api.probeHost(hostId))])
             })}>{t('networkManager.testHost')}</Button>
             <Button size="sm" variant="secondary" disabled={busy} onClick={() => void run(refreshHosts)}>{t('networkManager.refreshHosts')}</Button>
+            <Button size="sm" variant="secondary" disabled={busy || !canImportHost || hostError || draft.verificationTargets.length >= 32} onClick={() => {
+              const host = hosts.find(item => item.id === hostId)
+              if (host) edit({ ...draft, verificationTargets: [...draft.verificationTargets, { id: crypto.randomUUID(), label: host.name, address: host.address, port: host.port, protocol: 'tcp' }] })
+            }}>{t('networkManager.recovery.importHost')}</Button>
           </div>
           <NetworkExecutionReference api={api} stage="verify" profile={effectiveProfile ?? draft} extra={{ hostId, address: hosts.find(host => host.id === hostId)?.address ?? '', port: hosts.find(host => host.id === hostId)?.port ?? null }} />
         </section>

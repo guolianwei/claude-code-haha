@@ -176,6 +176,63 @@ describe('registerManagedResourcesIpc (M2.1)', () => {
     expect(result.data.expiresAt).toBeLessThanOrEqual(Date.now() + 15_000)
   })
 
+  it('copies a tag table only inside the main process and returns counts through IPC', async () => {
+    const created = await services.credentialService.create({
+      kind: 'ssh-password', label: 'clipboard fixture',
+      secret: { kind: 'ssh-password', password: 'tag-clipboard-fixture-secret' },
+    })
+    if (!('credential' in created)) throw new Error('fixture credential was not created')
+    const tagId = randomUUID()
+    const stamp = '2026-10-02T00:00:00Z'
+    const saved = await services.store.transact({ mutate(document) {
+      document.tags.push({ id: tagId, revision: 1, createdAt: stamp, updatedAt: stamp, namespace: 'host', name: 'fixture', normalizedName: 'fixture', colorToken: null })
+      document.hosts.push(HostSchema.parse({
+        id: randomUUID(), revision: 1, createdAt: stamp, updatedAt: stamp,
+        name: 'fixture server', address: '10.0.0.20', port: 22, username: 'root',
+        auth: { type: 'password', credentialId: created.credential.id },
+        tagIds: [tagId], initialDirectory: null, applications: [], notes: '',
+      }))
+      return { commit: true, value: undefined }
+    } })
+    expect(saved.status).toBe('committed')
+    const authorize = vi.fn(async () => ({ status: 'authorized' as const }))
+    services.credentialRevealAuthorizer = { authorize }
+    const writeText = vi.fn()
+    registerManagedResourcesIpc({
+      ipcMain: fakeIpcMain, getMainWindow: () => fakeMainWindow, services,
+      expectedOwnerId: ownerId, clipboard: { writeText },
+    })
+    const result = await handlers.get(MANAGED_RESOURCES_IPC_CHANNELS.copyTagConnections)!(
+      { sender: fakeMainWebContents, senderFrame: fakeMainFrame }, { tagId },
+    )
+    expect(result).toEqual({ ok: true, data: { hostCount: 1, accountCount: 1 } })
+    expect(authorize).toHaveBeenCalledTimes(1)
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(writeText.mock.calls[0]![0]).toContain('tag-clipboard-fixture-secret')
+    expect(JSON.stringify(result)).not.toContain('secret')
+  })
+
+  it('rejects tag-copy requests from another frame or with unknown input before reading credentials', async () => {
+    const writeText = vi.fn()
+    const authorize = vi.fn(async () => ({ status: 'authorized' as const }))
+    services.credentialRevealAuthorizer = { authorize }
+    const load = vi.spyOn(services.store, 'load')
+    registerManagedResourcesIpc({
+      ipcMain: fakeIpcMain, getMainWindow: () => fakeMainWindow, services,
+      expectedOwnerId: ownerId, clipboard: { writeText },
+    })
+    const invoke = handlers.get(MANAGED_RESOURCES_IPC_CHANNELS.copyTagConnections)!
+    expect(await invoke({ sender: fakeMainWebContents, senderFrame: {} }, { tagId: randomUUID() }))
+      .toMatchObject({ ok: false, error: { code: 'UNAUTHORIZED_OWNER' } })
+    expect(await invoke({ sender: fakeMainWebContents, senderFrame: fakeMainFrame }, { tagId: randomUUID(), markdown: 'untrusted content' }))
+      .toMatchObject({ ok: false, error: { code: 'INVALID_ARGUMENT' } })
+    expect(await invoke({ sender: fakeMainWebContents, senderFrame: fakeMainFrame }, { tagId: 'invalid-id' }))
+      .toMatchObject({ ok: false, error: { code: 'INVALID_ARGUMENT' } })
+    expect(load).not.toHaveBeenCalled()
+    expect(authorize).not.toHaveBeenCalled()
+    expect(writeText).not.toHaveBeenCalled()
+  })
+
   it('does not decrypt a saved password when Windows re-authentication fails', async () => {
     const created = await services.credentialService.create({
       kind: 'application-password',

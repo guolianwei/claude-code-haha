@@ -15,6 +15,7 @@ import { createDataConnectionRuntime, type DataConnectionDriverLoader } from './
 import { createDataBrowserService, type DataBrowserAdapterFactory } from './dataBrowserService.js'
 import { createDataBrowserAdapterFactory } from './dataBrowserDrivers.js'
 import { createWindowsCredentialRevealAuthorizer, type CredentialRevealAuthorizer } from './windowsCredentialReauth.js'
+import type { TagConnectionsClipboard } from './copyTagHostConnections.js'
 
 export type ManagedResourcesModule = {
   cleanup(): void
@@ -37,6 +38,7 @@ export type CreateManagedResourcesModuleOptions = {
   dataBrowserAdapters?: DataBrowserAdapterFactory
   dataConnectionDrivers?: DataConnectionDriverLoader
   credentialRevealAuthorizer?: CredentialRevealAuthorizer
+  clipboard?: TagConnectionsClipboard
 }
 
 export function createManagedResourcesModule(
@@ -186,6 +188,7 @@ export function createManagedResourcesModule(
     expectedOwnerId,
     dialogService,
     contextTicketClient,
+    clipboard: options.clipboard,
   })
 
   return {

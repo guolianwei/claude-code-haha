@@ -415,6 +415,9 @@ export const browserHost: DesktopHost = {
     async revealCredential() {
       return { ok: false, error: { code: 'UNAVAILABLE', messageKey: 'managedResources.errors.desktopOnly' } }
     },
+    async copyTagConnections() {
+      return { ok: false, error: { code: 'UNAVAILABLE', messageKey: 'managedResources.errors.desktopOnly' } }
+    },
     async provideTemporaryCredential() {
       return { ok: false, error: { code: 'UNAVAILABLE', messageKey: 'managedResources.errors.desktopOnly' } }
     },

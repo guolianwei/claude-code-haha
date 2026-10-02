@@ -6,7 +6,7 @@ import { isElectronIpcChannelAllowedForPetWindow, validateElectronIpcPayload } f
 
 describe('network manager IPC authorization and routing', () => {
   function fixture() {
-    const service = Object.fromEntries(['discoverProxy', 'executionCatalog', 'openNetworkConnections', 'list', 'save', 'inspect', 'plan', 'apply', 'recover', 'verify', 'probeHost', 'login', 'vpnRouteOptions', 'vpnRoutePreview', 'vpnRouteApply', 'vpnRouteVerify', 'vpnRouteBatchPreview', 'vpnRouteBatchApply', 'vpnRouteBatchVerify', 'vpnRouteProbe'].map(key => [key, vi.fn().mockResolvedValue({ ok: true, data: null })])) as unknown as NetworkManagerApi
+    const service = Object.fromEntries(['discoverProxy', 'executionCatalog', 'openNetworkConnections', 'openSystemTool', 'verifyStep', 'list', 'save', 'inspect', 'plan', 'apply', 'recover', 'verify', 'probeHost', 'login', 'vpnRouteOptions', 'vpnRoutePreview', 'vpnRouteApply', 'vpnRouteVerify', 'vpnRouteBatchPreview', 'vpnRouteBatchApply', 'vpnRouteBatchVerify', 'vpnRouteProbe'].map(key => [key, vi.fn().mockResolvedValue({ ok: true, data: null })])) as unknown as NetworkManagerApi
     const sender = { mainFrame: {} }
     const getService = vi.fn(() => service)
     return { service, sender, getService, handler: createNetworkManagerHandler({ getMainWebContents: () => sender, getService }) }
@@ -84,5 +84,26 @@ describe('network manager IPC authorization and routing', () => {
     expect(service.vpnRouteProbe).toHaveBeenCalledWith(probe)
     expect(await handler(event, { action: 'vpnRouteBatchPreview', input: { ...batch, commands: ['Remove-NetRoute'] } })).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
     expect(await handler(event, { action: 'vpnRouteProbe', input: { ...probe, port: -1 } })).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
+  })
+
+  it('routes step checks and fixed repair shortcuts without arbitrary command or path access', async () => {
+    const { sender, handler, service, getService } = fixture()
+    const profile = createDefaultNetworkProfiles()[0]
+    await expect(handler({ sender, senderFrame: {} }, { action: 'verifyStep', profile, step: 'relay' })).rejects.toThrow('main desktop window')
+    expect(getService).not.toHaveBeenCalled()
+    const event = { sender, senderFrame: sender.mainFrame }
+    await handler(event, { action: 'verifyStep', profile, step: 'relay' })
+    expect(service.verifyStep).toHaveBeenCalledExactlyOnceWith(profile, 'relay')
+    for (const target of ['tasks', 'services']) await handler(event, { action: 'openSystemTool', target })
+    expect(service.openSystemTool).toHaveBeenCalledTimes(2)
+    for (const request of [
+      { action: 'verifyStep', profile, step: 'command' },
+      { action: 'openSystemTool', target: 'cmd.exe' },
+      { action: 'openSystemTool', target: 'tasks', path: 'C:\\unknown.msc' },
+    ]) {
+      expect(validateElectronIpcPayload(ELECTRON_IPC_CHANNELS.networkManager, request)).toBe(false)
+      expect(await handler(event, request)).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } })
+    }
+    expect(service.openSystemTool).toHaveBeenCalledTimes(2)
   })
 })

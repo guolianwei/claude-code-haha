@@ -70,7 +70,7 @@ describe('built-in NetworkConfig agent tool', () => {
     const access: NetworkConfigAccess = {
       listHosts: async () => [],
       api: {
-        list: async () => ({ ok: true, data: { schemaVersion: 1, revision: 1, profiles } }),
+        list: async () => ({ ok: true, data: { schemaVersion: 2, revision: 1, profiles } }),
         plan: async profile => {
           calls.push(profile)
           return { ok: true, data: { snapshot: { id: 'snapshot' } as never, plan: { id: 'native-only-plan', steps: [], changes: [], canApply: false } as never } }

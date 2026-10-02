@@ -3,7 +3,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type {
   NetworkApplyReport, NetworkChange, NetworkManagerApi, NetworkPlan, NetworkProbe,
-  NetworkProfile, NetworkResult, NetworkSnapshot, NetworkStep, VpnRouteApplyReport,
+  NetworkProfile, NetworkResult, NetworkSnapshot, NetworkStep, NetworkStepId, VpnRouteApplyReport,
   VpnRouteBatchInput, VpnRouteBatchPlan, VpnRouteBatchReport, VpnRoutePlan, VpnRouteSelection, VpnRouteTarget,
 } from '../../../src/features/network-manager/networkTypes'
 import { proxyBypassCovers } from '../../../src/features/network-manager/networkTypes'
@@ -15,23 +15,29 @@ import { probeDirectHttp, probeHttpProxy, probeTcp, type DirectHttpProbe, type H
 import { runNetworkPowerShell, type NetworkCommand, type NetworkRunner } from './powershell'
 import { discoverSakura } from './proxyDiscovery'
 import { getNetworkExecutionCatalog } from './executionCatalog'
+import { createRelayRecovery, type RelayRecoveryInspection } from './relayRecovery'
+import { resolveObservedVpn, verificationTargets, hasContainerRoute } from './recoveryPolicy'
 
 type RawSnapshot = {
   interfaces: { InterfaceIndex: number; InterfaceAlias: string; ConnectionState: number | string; InterfaceMetric: number }[]
   addresses: { InterfaceIndex: number; IPAddress: string; PrefixLength: number }[]
   adapters: { InterfaceIndex: number; InterfaceGuid: string; Status: string }[]
   routes: { prefix: string; nextHop: string; interfaceIndex: number; interfaceAlias: string; metric: number; store: string }[]
-  vpns: { name: string; scope: string; connected: boolean; splitTunneling: boolean; routes: { prefix: string; metric: number }[] }[]
+  vpns: { name: string; scope: string; serverAddress?: string; connected: boolean; splitTunneling: boolean; routes: { prefix: string; metric: number }[] }[]
   selected: NetworkSnapshot['selectedRoutes']
   service: { Name: string; status: string; startType: string } | null
   task: { TaskName: string; state: string; enabled: boolean } | null
   handshakes: number[]
+  serviceStatus?: 'present' | 'missing' | 'unknown'
+  taskStatus?: 'present' | 'missing' | 'unknown'
+  receivedBytes?: number
+  sentBytes?: number
   admin: boolean
   issues: string[]
 }
-type Observation = { snapshot: NetworkSnapshot; raw: RawSnapshot; ownedRoutes: Operation[] }
+type Observation = { snapshot: NetworkSnapshot; raw: RawSnapshot; ownedRoutes: Operation[]; relay: RelayRecoveryInspection | null }
 type Operation = { id: string; command: NetworkCommand; inverse: NetworkCommand; before: unknown; after: unknown; interfaceGuid?: string }
-type JournalEntry = { id: string; operation?: Operation; proxy?: ProxyUndo; completed: boolean; restored?: boolean }
+type JournalEntry = { id: string; operation?: Operation; proxy?: ProxyUndo; relayCreated?: { binaryHash: string; taskFingerprint?: string }; completed: boolean; restored?: boolean }
 type Journal = { schemaVersion: 1; planId: string; profile: NetworkProfile; status: 'applying' | 'applied' | 'rolled-back' | 'rollback-conflict'; entries: JournalEntry[] }
 type StoredPlan = { profile: NetworkProfile; observation: Observation; plan: NetworkPlan; fingerprint: string; operations: Operation[] }
 type BindingObservation = { raw: RawSnapshot; selected: VpnRoutePlan['selected']; fingerprint: string }
@@ -51,6 +57,7 @@ export type NetworkManagerOptions = {
   tcp?: TcpProbe
   http?: HttpProbe
   directHttp?: DirectHttpProbe
+  relay?: ReturnType<typeof createRelayRecovery>
   now?: () => number
   delay?: (milliseconds: number) => Promise<void>
 }
@@ -73,6 +80,12 @@ const serviceName = (profile: NetworkProfile) => `WireGuardTunnel$${profile.tunn
 function validateJournalEntry(entry: JournalEntry, profile: NetworkProfile): void {
   const reject = () => { throw new Error('RECOVERY_JOURNAL_INVALID') }
   if (!entry || typeof entry.id !== 'string' || typeof entry.completed !== 'boolean' || (entry.restored !== undefined && typeof entry.restored !== 'boolean')) reject()
+  if (entry.relayCreated) {
+    if (entry.id !== 'relay-register' || entry.operation || entry.proxy || !/^[a-f0-9]{64}$/i.test(entry.relayCreated.binaryHash)
+      || (entry.relayCreated.taskFingerprint !== undefined && !/^[a-f0-9]{64}$/i.test(entry.relayCreated.taskFingerprint))
+      || (entry.completed && !entry.relayCreated.taskFingerprint)) reject()
+    return
+  }
   if (entry.proxy) {
     const undo = entry.proxy
     if (entry.operation || entry.id !== 'proxy-bypass' || undo.path !== profile.proxyConfigPath
@@ -108,11 +121,19 @@ function validateJournalEntry(entry: JournalEntry, profile: NetworkProfile): voi
       if (a.name !== (a.action === 'service' ? serviceName(profile) : profile.relayTaskName) || typeof a.running !== 'boolean') return reject()
       before = !a.running; after = a.running
       expected = { action: a.action, name: a.name, running: before }
+      if (a.action === 'task' && a.expectedTaskFingerprint !== undefined) {
+        if (!/^[a-f0-9]{64}$/i.test(String(a.expectedTaskFingerprint))) return reject()
+        expected.expectedTaskFingerprint = a.expectedTaskFingerprint
+      }
       break
     case 'taskEnabled':
       if (a.name !== profile.relayTaskName || typeof a.enabled !== 'boolean') return reject()
       before = !a.enabled; after = a.enabled
       expected = { action: a.action, name: a.name, enabled: before }
+      if (a.expectedTaskFingerprint !== undefined) {
+        if (!/^[a-f0-9]{64}$/i.test(String(a.expectedTaskFingerprint))) return reject()
+        expected.expectedTaskFingerprint = a.expectedTaskFingerprint
+      }
       break
     case 'serviceStartup':
       if (a.name !== serviceName(profile) || !['Automatic', 'Manual', 'Disabled'].includes(String(a.startType)) || !['Automatic', 'Manual', 'Disabled'].includes(String(b.startType))) return reject()
@@ -140,7 +161,9 @@ const stableSnapshot = (observation: Observation) => hash({
   selected: observation.snapshot.selectedRoutes,
   vpn: observation.snapshot.vpn,
   proxy: observation.snapshot.proxy,
-  tunnel: { ...observation.snapshot.tunnel, latestHandshake: undefined },
+  tunnel: { serviceExists: observation.snapshot.tunnel.serviceExists, running: observation.snapshot.tunnel.running,
+    taskExists: observation.snapshot.tunnel.taskExists, taskRunning: observation.snapshot.tunnel.taskRunning, taskEnabled: observation.snapshot.tunnel.taskEnabled },
+  relay: observation.relay ? { binary: observation.relay.binary, taskFingerprint: observation.relay.task.fingerprint, taskStatus: observation.relay.task.status } : null,
   adapters: observation.raw.adapters,
   startup: observation.raw.service?.startType,
 })
@@ -152,6 +175,7 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
   const tcp = options.tcp ?? probeTcp
   const http = options.http ?? probeHttpProxy
   const directHttp = options.directHttp ?? probeDirectHttp
+  const relay = options.relay ?? createRelayRecovery(runner)
   const now = options.now ?? Date.now
   const delay = options.delay ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)))
   const repository = createNetworkRepository(options.configDir)
@@ -334,7 +358,7 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
       if ((await fs.stat(journalPath)).size > 1_000_000) throw new Error('RECOVERY_JOURNAL_INVALID')
       const document = JSON.parse(await fs.readFile(journalPath, 'utf8')) as Journal
       if (document.schemaVersion !== 1 || !Array.isArray(document.entries) || !['applying', 'applied', 'rolled-back', 'rollback-conflict'].includes(document.status)) throw new Error('RECOVERY_JOURNAL_INVALID')
-      profileInput(document.profile)
+      document.profile = profileInput(document.profile)
       if (document.entries.length > 64) throw new Error('RECOVERY_JOURNAL_INVALID')
       document.entries.forEach(entry => validateJournalEntry(entry, document.profile))
       return document
@@ -346,26 +370,51 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
 
   async function observe(profile: NetworkProfile): Promise<Observation> {
     let raw = emptyRaw()
-    if (platform === 'win32') {
-      raw = await runner({ action: 'snapshot', targets: [...new Set([profile.gatewayAddress, profile.containerProbeAddress, '1.1.1.1'])], service: serviceName(profile), task: profile.relayTaskName, tunnel: profile.tunnelName }) as RawSnapshot
-      if (!raw || !Array.isArray(raw.interfaces) || !Array.isArray(raw.routes) || !Array.isArray(raw.vpns) || !Array.isArray(raw.selected)) throw new Error('NETWORK_RESPONSE_INVALID')
-    }
-    const vpn = raw.vpns.find(item => item.name === profile.vpnName && item.scope === profile.vpnScope)
-    const issues = [...raw.issues]
+    let relayState: RelayRecoveryInspection | null = null
     let proxyState: NetworkSnapshot['proxy'] = { available: false, mode: '', tunEnabled: false, controller: '', bypassPrefixes: [], configHash: '' }
+    const inspectionIssues: string[] = []
     if (platform === 'win32') {
-      try { proxyState = await proxy.inspect(profile) } catch (error) { issues.push(failure(error).ok ? '' : (failure(error) as { ok: false; error: { code: string } }).error.code) }
-    } else issues.push('WINDOWS_REQUIRED')
+      const [nativeResult, relayResult, proxyResult] = await Promise.allSettled([
+        runner({ action: 'snapshot', targets: [...new Set([profile.gatewayAddress, profile.containerProbeAddress, ...verificationTargets(profile).map(target => target.address), '1.1.1.1', ...(profile.vpnServerAddress && /^\d+(\.\d+){3}$/.test(profile.vpnServerAddress) ? [profile.vpnServerAddress] : [])])], service: serviceName(profile), task: profile.relayTaskName, tunnel: profile.tunnelName }),
+        profile.containerEnabled ? relay.inspect(profile) : Promise.resolve(null),
+        proxy.inspect(profile),
+      ])
+      if (nativeResult.status === 'rejected') throw nativeResult.reason
+      raw = nativeResult.value as RawSnapshot
+      if (!raw || !Array.isArray(raw.interfaces) || !Array.isArray(raw.routes) || !Array.isArray(raw.vpns) || !Array.isArray(raw.selected)) throw new Error('NETWORK_RESPONSE_INVALID')
+      if (relayResult.status === 'fulfilled') relayState = relayResult.value
+      else inspectionIssues.push('RELAY_INSPECTION_UNKNOWN')
+      if (proxyResult.status === 'fulfilled') proxyState = proxyResult.value
+      else {
+        const result = failure(proxyResult.reason)
+        if (!result.ok) inspectionIssues.push(result.error.code)
+      }
+    } else inspectionIssues.push('WINDOWS_REQUIRED')
+    const resolved = resolveObservedVpn(profile, raw.vpns, raw.issues)
+    const vpn = resolved.vpn
+    const issues = [...raw.issues, ...inspectionIssues]
     const journal = await readJournal()
-    if (journal && ['applying', 'rollback-conflict'].includes(journal.status)) issues.push('RECOVERY_REQUIRED')
+    if (journal && ['applying', 'rollback-conflict'].includes(journal.status) && !busy) issues.push('RECOVERY_REQUIRED')
     const snapshot: NetworkSnapshot = {
       id: randomUUID(), collectedAt: new Date(now()).toISOString(), platform, elevated: raw.admin,
       interfaces: raw.interfaces.map(item => ({ index: item.InterfaceIndex, alias: item.InterfaceAlias, physical: raw.adapters.some(adapter => adapter.InterfaceIndex === item.InterfaceIndex), connected: item.ConnectionState === 1 || item.ConnectionState === 'Connected', metric: item.InterfaceMetric, addresses: raw.addresses.filter(address => address.InterfaceIndex === item.InterfaceIndex).map(address => `${address.IPAddress}/${address.PrefixLength}`) })),
       routes: raw.routes.map(route => ({ ...route, store: route.store === 'PersistentStore' ? 'persistent' : 'active' })),
       selectedRoutes: raw.selected.filter(route => route.source && route.interfaceIndex),
-      vpn: { exists: !!vpn, connected: !!vpn?.connected, splitTunneling: !!vpn?.splitTunneling, routePrefixes: vpn?.routes.map(route => route.prefix) ?? [] },
+      vpn: { exists: !!vpn, name: vpn?.name, serverAddress: vpn?.serverAddress, scope: vpn?.scope, status: resolved.status, connected: !!vpn?.connected, splitTunneling: !!vpn?.splitTunneling, routePrefixes: vpn?.routes.map(route => route.prefix) ?? [] },
       proxy: proxyState,
-      tunnel: { serviceExists: !!raw.service, running: raw.service?.status === 'Running', taskExists: !!raw.task, taskRunning: raw.task?.state === 'Running', taskEnabled: !!raw.task?.enabled, latestHandshake: Math.max(0, ...raw.handshakes) || null },
+      tunnel: { serviceExists: !!raw.service, running: raw.service?.status === 'Running',
+        taskExists: relayState ? relayState.task.status === 'present' : !!raw.task,
+        taskRunning: relayState ? relayState.task.state === 'Running' : raw.task?.state === 'Running',
+        taskEnabled: relayState ? relayState.task.enabled === true : !!raw.task?.enabled, latestHandshake: Math.max(0, ...raw.handshakes) || null,
+        serviceStatus: raw.serviceStatus ?? (raw.service ? 'present' : raw.issues.some(issue => issue.startsWith('service')) ? 'unknown' : 'missing'),
+        taskStatus: relayState?.task.status ?? raw.taskStatus ?? 'unknown', startupType: raw.service?.startType,
+        udpListening: !relayState || relayState.udp.status === 'unknown' ? undefined : relayState.udp.status === 'ready',
+        tcpConnected: !relayState || relayState.tcp.status === 'unknown' ? undefined : relayState.tcp.status === 'ready',
+        processPriority: relayState?.udp.processPriority,
+        relayReady: !relayState || relayState.udp.status === 'unknown' || relayState.tcp.status === 'unknown' ? undefined
+          : relayState.udp.status === 'ready' && relayState.tcp.status === 'ready' && relayState.udp.processPriority === 'Normal',
+        readinessIssues: relayState?.issues ?? (profile.containerEnabled ? ['RELAY_INSPECTION_UNKNOWN'] : []),
+        receivedBytes: raw.receivedBytes ?? undefined, sentBytes: raw.sentBytes ?? undefined, binaryHash: relayState?.binary.sha256 ?? undefined, taskDefinitionMatches: relayState?.task.definitionMatches ?? undefined },
       issues,
     }
     let ownedRoutes: Operation[] = []
@@ -381,7 +430,7 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') snapshot.issues.push('ROUTE_OWNERSHIP_INVALID')
     }
-    return { snapshot, raw, ownedRoutes }
+    return { snapshot, raw, ownedRoutes, relay: relayState }
   }
 
   function buildPlan(profile: NetworkProfile, observation: Observation): StoredPlan {
@@ -391,26 +440,40 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
     const operations: Operation[] = []
     const step = (id: NetworkStep['id'], state: NetworkStep['state'], code: string, details: string[] = []) => steps.push({ id, state, code, details })
     const add = (id: NetworkChange['id'], before: string, after: string) => changes.push({ id, before, after })
-    const op = (id: string, command: NetworkCommand, inverse: NetworkCommand, before: unknown, after: unknown) => operations.push({ id, command, inverse, before, after, ...(command.action.startsWith('route') ? { interfaceGuid: raw.adapters.find(item => item.InterfaceIndex === command.interfaceIndex)?.InterfaceGuid } : {}) })
+    const op = (id: string, command: NetworkCommand, inverse: NetworkCommand, before: unknown, after: unknown) => {
+      if (['task', 'taskEnabled'].includes(command.action) && observation.relay?.task.fingerprint) {
+        command.expectedTaskFingerprint = observation.relay.task.fingerprint
+        inverse.expectedTaskFingerprint = observation.relay.task.fingerprint
+      }
+      operations.push({ id, command, inverse, before, after, ...(command.action.startsWith('route') ? { interfaceGuid: raw.adapters.find(item => item.InterfaceIndex === command.interfaceIndex)?.InterfaceGuid } : {}) })
+    }
     const physical = snapshot.interfaces.filter(item => item.physical && item.connected && item.addresses.length)
+    const routeActive = (route: NetworkSnapshot['routes'][number]) => !snapshot.interfaces.some(item => item.index === route.interfaceIndex && !item.connected)
     if (platform !== 'win32') step('physical', 'blocked', 'windowsRequired')
     else step('physical', physical.length ? 'ready' : 'blocked', physical.length ? 'physicalReady' : 'physicalMissing', physical.map(item => `${item.alias}: ${item.addresses.join(', ')}`))
     if (snapshot.issues.includes('RECOVERY_REQUIRED')) step('physical', 'blocked', 'recoveryRequired', [journalPath])
+    if (raw.issues.some(issue => /^(interfaces|addresses|adapters|routes\/|selected\/)/.test(issue))) step('physical', 'blocked', 'inspectionUnknown', raw.issues)
     const selected = snapshot.selectedRoutes.find(route => route.target === profile.gatewayAddress)
     const selectedInterface = snapshot.interfaces.find(item => item.index === selected?.interfaceIndex)
     const viaVpn = selectedInterface?.alias === profile.vpnName
     if (profile.mode === 'home') {
-      if (!snapshot.vpn.exists) step('vpn', 'manual', 'vpnMissing', [profile.vpnName, profile.vpnScope])
+      if (snapshot.vpn.status === 'unknown') step('vpn', 'blocked', 'inspectionUnknown', raw.issues.filter(issue => issue.startsWith('vpn/')))
+      else if (snapshot.vpn.status === 'ambiguous') step('vpn', 'manual', 'vpnAmbiguous', [profile.vpnServerAddress, profile.vpnScope])
+      else if (!snapshot.vpn.exists) step('vpn', 'manual', 'vpnMissing', [profile.vpnName, profile.vpnScope])
       else if (!snapshot.vpn.connected) step('vpn', 'manual', 'vpnNeedsConnection', [profile.vpnName, profile.vpnScope])
       else {
         const vpnArgs = { name: profile.vpnName, scope: profile.vpnScope }
-        if (!snapshot.vpn.splitTunneling) {
-          add('vpn-split', 'SplitTunneling=false', 'SplitTunneling=true')
-          op('vpn-split', { action: 'split', ...vpnArgs, enabled: true }, { action: 'split', ...vpnArgs, enabled: false }, false, true)
-        }
-        if (!snapshot.vpn.routePrefixes.includes(profile.managementPrefix)) {
+        if (profile.splitTunnelingPolicy === 'enabled' && !snapshot.vpn.routePrefixes.includes(profile.managementPrefix)) {
           add('vpn-route', '', profile.managementPrefix)
           op('vpn-route', { action: 'vpnRouteAdd', ...vpnArgs, prefix: profile.managementPrefix, metric: 1 }, { action: 'vpnRouteRemove', ...vpnArgs, prefix: profile.managementPrefix }, false, true)
+        }
+        if (profile.splitTunnelingPolicy === 'enabled' && !snapshot.vpn.splitTunneling) {
+          // Never remove the working VPN default until a narrower corporate path is active.
+          if (viaVpn && selected && Number(selected.prefix.split('/')[1]) >= Number(profile.managementPrefix.split('/')[1])) {
+            add('vpn-split', 'SplitTunneling=false', 'SplitTunneling=true')
+            op('vpn-split', { action: 'split', ...vpnArgs, enabled: true }, { action: 'split', ...vpnArgs, enabled: false }, false, true)
+          } else step('vpn', operations.some(item => item.id === 'vpn-route') ? 'change' : 'manual',
+            operations.some(item => item.id === 'vpn-route') ? 'vpnRoutePrepared' : 'vpnReconnectRequired', [profile.managementPrefix])
         }
         step('vpn', changes.length ? 'change' : 'ready', changes.length ? 'vpnChange' : 'vpnReady', [profile.vpnName, profile.vpnScope])
       }
@@ -430,12 +493,12 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
 
     if (!profile.containerEnabled) step('container', 'skipped', 'containerDisabled')
     else {
-      const conflicts = snapshot.routes.filter(route => route.store === 'active' && Number(route.prefix.split('/')[1]) > Number(profile.containerPrefix.split('/')[1]) && isAddressInPrefix(route.prefix.split('/')[0] ?? '', profile.containerPrefix))
+      const conflicts = snapshot.routes.filter(route => routeActive(route) && route.store === 'active' && Number(route.prefix.split('/')[1]) > Number(profile.containerPrefix.split('/')[1]) && isAddressInPrefix(route.prefix.split('/')[0] ?? '', profile.containerPrefix))
       if (conflicts.length) step('container', 'blocked', 'routeConflict', conflicts.map(route => `${route.prefix} → ${route.interfaceAlias} / ${route.nextHop}`))
-      const overlaps = snapshot.interfaces.filter(item => item.alias !== profile.tunnelName && item.addresses.some(address => isAddressInPrefix(address.split('/')[0] ?? '', profile.containerPrefix)))
+      const overlaps = snapshot.interfaces.filter(item => item.connected && item.alias !== profile.tunnelName && item.addresses.some(address => isAddressInPrefix(address.split('/')[0] ?? '', profile.containerPrefix)))
       if (overlaps.length) step('container', 'blocked', 'addressOverlap', overlaps.map(item => `${item.alias}: ${item.addresses.join(', ')}`))
       if (profile.mode === 'home') {
-        const routes = snapshot.routes.filter(route => route.prefix === profile.containerPrefix && route.interfaceAlias !== profile.tunnelName)
+        const routes = snapshot.routes.filter(route => routeActive(route) && route.prefix === profile.containerPrefix && route.interfaceAlias !== profile.tunnelName)
         const owned = observation.ownedRoutes.filter(item => item.command.prefix === profile.containerPrefix && item.command.nextHop === profile.gatewayAddress)
         const matchesOwned = (route: NetworkSnapshot['routes'][number]) => owned.some(item => route.prefix === item.command.prefix && route.nextHop === item.command.nextHop && route.interfaceIndex === item.command.interfaceIndex && route.metric === item.command.metric && (route.store === 'active' ? 'ActiveStore' : 'PersistentStore') === item.command.store)
         if (routes.length) {
@@ -449,14 +512,23 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
         const vpnAddress = snapshot.interfaces.find(item => item.alias === profile.vpnName)?.addresses[0]?.split('/')[0]
         const actualSource = viaVpn ? selected?.source : vpnAddress
         if (!profile.expectedRelaySource || actualSource !== profile.expectedRelaySource) step('relay', 'blocked', 'sourceAclMismatch', [actualSource ?? 'unknown', profile.expectedRelaySource || 'not configured', 'Verify SSH_CONNECTION on the trusted gateway. Update both the exact INPUT source and relay -source; never allow all sources.'])
-        else step('relay', snapshot.tunnel.taskRunning && snapshot.tunnel.taskEnabled ? 'ready' : 'change', snapshot.tunnel.taskRunning && snapshot.tunnel.taskEnabled ? 'relayReady' : 'relayChange', [`${profile.gatewayAddress}:${profile.relayPort}`, `Expected server-authorized source: ${profile.expectedRelaySource}; remote NAT/ACL is not automatically verified`])
-        if (!snapshot.tunnel.taskExists) step('relay', 'manual', 'relayMissing', [profile.relayTaskName])
+        else step('relay', snapshot.tunnel.relayReady ? 'ready' : 'change', snapshot.tunnel.relayReady ? 'relayReady' : 'relayNotReady', [`${profile.gatewayAddress}:${profile.relayPort}`, `Expected server-authorized source: ${profile.expectedRelaySource}; remote NAT/ACL is not automatically verified`])
+        if (!observation.relay || observation.relay.task.status === 'unknown') step('relay', 'blocked', 'inspectionUnknown', snapshot.tunnel.readinessIssues)
+        else if (observation.relay.task.status === 'missing') {
+          if (observation.relay.binary.status === 'present' && observation.relay.binary.secureAcl && observation.relay.binary.sha256) {
+            add('relay-register', 'Missing', `${profile.relayExecutable} -mode client; SYSTEM; boot; priority=4`)
+            step('relay', 'change', 'relayRegistrationReady', [profile.relayExecutable, observation.relay.binary.sha256])
+            op('relay-start', { action: 'task', name: profile.relayTaskName, running: true }, { action: 'task', name: profile.relayTaskName, running: false }, false, true)
+          } else step('relay', 'manual', 'relayMissing', [profile.relayExecutable, ...observation.relay.issues])
+        }
+        else if (!observation.relay.task.definitionMatches) step('relay', 'manual', 'relayDefinitionMismatch', [profile.relayTaskName, profile.relayExecutable, ...observation.relay.issues])
         else if (!snapshot.tunnel.taskRunning || !snapshot.tunnel.taskEnabled) {
           add('relay-start', `running=${snapshot.tunnel.taskRunning}, enabled=${snapshot.tunnel.taskEnabled}`, 'running=true, enabled=true')
           if (!snapshot.tunnel.taskEnabled) op('relay-enable', { action: 'taskEnabled', name: profile.relayTaskName, enabled: true }, { action: 'taskEnabled', name: profile.relayTaskName, enabled: false }, false, true)
           if (!snapshot.tunnel.taskRunning) op('relay-start', { action: 'task', name: profile.relayTaskName, running: true }, { action: 'task', name: profile.relayTaskName, running: false }, false, true)
         }
-        if (!snapshot.tunnel.serviceExists) step('tunnel', 'manual', 'tunnelMissing', [serviceName(profile)])
+        if (snapshot.tunnel.serviceStatus === 'unknown') step('tunnel', 'blocked', 'inspectionUnknown', [serviceName(profile)])
+        else if (!snapshot.tunnel.serviceExists) step('tunnel', 'manual', 'tunnelMissing', [serviceName(profile)])
         else {
           const startType = raw.service!.startType
           if (!snapshot.tunnel.running || startType !== 'Automatic') {
@@ -468,6 +540,8 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
         }
         step('container', 'ready', 'containerTunnel', [profile.containerPrefix])
       } else {
+        if (snapshot.tunnel.serviceStatus === 'unknown' || snapshot.tunnel.taskStatus === 'unknown') step('container', 'blocked', 'inspectionUnknown', snapshot.tunnel.readinessIssues)
+        if (snapshot.tunnel.taskExists && observation.relay?.task.definitionMatches === false) step('relay', 'manual', 'relayDefinitionMismatch', [profile.relayTaskName])
         // Stop and disable only this dedicated transport; corporate VPN and all other tunnels are preserved.
         if (snapshot.tunnel.serviceExists && (snapshot.tunnel.running || raw.service?.startType !== 'Manual')) {
           add('tunnel-stop', `running=${snapshot.tunnel.running}, startType=${raw.service?.startType}`, 'running=false, startType=Manual')
@@ -480,7 +554,7 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
           if (snapshot.tunnel.taskEnabled) op('relay-disable', { action: 'taskEnabled', name: profile.relayTaskName, enabled: false }, { action: 'taskEnabled', name: profile.relayTaskName, enabled: true }, true, false)
         }
         const desired = { prefix: profile.containerPrefix, interfaceIndex: selected?.interfaceIndex, nextHop: profile.gatewayAddress, metric: 5, store: 'PersistentStore' }
-        const existing = snapshot.routes.filter(route => route.prefix === profile.containerPrefix && route.interfaceAlias !== profile.tunnelName)
+        const existing = snapshot.routes.filter(route => routeActive(route) && route.prefix === profile.containerPrefix && route.interfaceAlias !== profile.tunnelName)
         const exact = existing.find(route => route.interfaceIndex === desired.interfaceIndex && route.nextHop === desired.nextHop && route.store === 'persistent')
         if (existing.some(route => route.interfaceIndex !== desired.interfaceIndex || route.nextHop !== desired.nextHop)) step('container', 'blocked', 'routeConflict', existing.map(route => `${route.prefix} → ${route.interfaceAlias} / ${route.nextHop}`))
         else if (selected && (!exact || !existing.some(route => route.store === 'active'))) {
@@ -495,53 +569,122 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
         step('container', exact ? 'ready' : 'change', 'containerDirect', [profile.containerPrefix, profile.gatewayAddress])
       }
     }
-    if (operations.length && !snapshot.elevated) step('physical', 'manual', 'elevationRequired')
-    const plan: NetworkPlan = { id: randomUUID(), profileId: profile.id, snapshotId: snapshot.id, createdAt: new Date(now()).toISOString(), expiresAt: new Date(now() + 120_000).toISOString(), steps, changes, canApply: !steps.some(item => item.state === 'blocked' || item.state === 'manual') }
+    if ((operations.length || changes.some(change => change.id === 'relay-register')) && !snapshot.elevated) step('physical', 'manual', 'elevationRequired')
+    const plan: NetworkPlan = { id: randomUUID(), profileId: profile.id, snapshotId: snapshot.id, createdAt: new Date(now()).toISOString(), expiresAt: new Date(now() + 120_000).toISOString(), steps, changes, canApply: !steps.some(item => item.state === 'blocked' || (item.state === 'manual' && item.id !== 'proxy')) }
     plan.execution = operations.map(operation => ({ id: operation.id, command: { ...operation.command }, inverse: { ...operation.inverse } }))
+    if (changes.some(change => change.id === 'relay-register')) {
+      const relayArgs = { relayExecutable: profile.relayExecutable, relayTaskName: profile.relayTaskName,
+        relayLocalPort: profile.relayLocalPort, gatewayAddress: profile.gatewayAddress, relayPort: profile.relayPort, tunnelName: profile.tunnelName }
+      plan.execution.unshift({ id: 'relay-register', command: { action: 'relayTaskCreate', ...relayArgs, expectedBinaryHash: observation.relay!.binary.sha256 },
+        inverse: { action: 'relayTaskRemove', ...relayArgs, expectedTaskFingerprint: '<created-task fingerprint>' } })
+      const start = plan.execution.find(item => item.id === 'relay-start')
+      if (start) {
+        start.command.expectedTaskFingerprint = '<created-task fingerprint>'
+        if (start.inverse) start.inverse.expectedTaskFingerprint = '<created-task fingerprint>'
+      }
+    }
     if (changes.some(change => change.id === 'proxy-bypass')) plan.execution.push({
       id: 'proxy-bypass', command: { action: 'proxy-bypass', configPath: profile.proxyConfigPath, mode: 'rule', prefixes: bypass }, inverse: null,
     })
     return { profile, observation, plan, fingerprint: stableSnapshot(observation), operations }
   }
 
-  async function verify(profile: NetworkProfile): Promise<NetworkProbe[]> {
-    let observation = await observe(profile)
-    let snapshot = observation.snapshot
+  async function verify(profile: NetworkProfile, only?: NetworkStepId, deadline = Infinity): Promise<NetworkProbe[]> {
+    const checkDeadline = () => { if (now() >= deadline) throw new Error('TRANSPORT_READINESS_TIMEOUT') }
+    checkDeadline()
+    let snapshot = (await observe(profile)).snapshot
+    checkDeadline()
     const checks: NetworkProbe[] = []
-    const routeCheck = (target: string, expectedAlias?: string, physical = false) => {
+    const wants = (...steps: NetworkStepId[]) => !only || steps.includes(only)
+    const record = (target: string, kind: NetworkProbe['kind'], ok: boolean, detail: string) => checks.push({ target, kind, ok, detail, checkedAt: new Date(now()).toISOString(), latencyMs: 0 })
+    const routeCheck = (target: string, container = false) => {
       const route = snapshot.selectedRoutes.find(item => item.target === target)
       const iface = snapshot.interfaces.find(item => item.index === route?.interfaceIndex)
-      const gateway = snapshot.selectedRoutes.find(item => item.target === profile.gatewayAddress)
-      const containerDirect = target !== profile.containerProbeAddress || (route?.nextHop === profile.gatewayAddress && route?.interfaceIndex === gateway?.interfaceIndex && route?.prefix === profile.containerPrefix)
-      const ok = !!route && (physical ? !!iface?.physical && containerDirect : route.interfaceAlias === expectedAlias)
+      const ok = container ? hasContainerRoute(profile, snapshot, target) : !!route && (profile.mode === 'work'
+        ? !!iface?.physical && iface.connected && route.nextHop === '0.0.0.0'
+        : snapshot.vpn.connected && route.interfaceAlias === snapshot.vpn.name)
       checks.push({ target, kind: 'route', ok, checkedAt: new Date(now()).toISOString(), latencyMs: 0, source: route?.source, interfaceAlias: route?.interfaceAlias, detail: ok ? 'EXPECTED_ROUTE_SELECTED' : 'ROUTE_MISMATCH' })
     }
-    routeCheck(profile.gatewayAddress, profile.vpnName, profile.mode === 'work')
-    checks.push(await tcp(profile.gatewayAddress, profile.gatewayPort))
-    const external = await http(profile.externalProbeUrl, profile.proxyPort)
-    const desiredBypass = [profile.managementPrefix, ...(profile.containerEnabled ? [profile.containerPrefix] : [])]
-    if (!snapshot.proxy.available || snapshot.proxy.mode !== 'rule' || desiredBypass.some(prefix => !proxyBypassCovers(snapshot.proxy.bypassPrefixes, prefix))) {
-      external.ok = false
-      external.detail = 'PROXY_CONFIGURATION_MISMATCH'
+    if (only === 'physical') {
+      const physical = snapshot.interfaces.filter(item => item.physical && item.connected && item.addresses.length)
+      record(physical.map(item => item.alias).join(', ') || 'physical', 'service', physical.length > 0, physical.length ? 'PHYSICAL_CONNECTED' : 'PHYSICAL_UNAVAILABLE')
     }
-    checks.push(external)
-    if (profile.containerEnabled) {
-      // Generate real tunnel traffic before sampling handshake; a newly started peer may be idle.
-      const containerProbe = await tcp(profile.containerProbeAddress, profile.containerProbePort)
-      if (profile.mode === 'home') {
-        checks.push(await tcp(profile.gatewayAddress, profile.relayPort))
-        for (let attempt = 0; attempt < 4; attempt++) {
-          observation = await observe(profile)
-          snapshot = observation.snapshot
-          if (snapshot.tunnel.latestHandshake && now() / 1000 - snapshot.tunnel.latestHandshake < 180) break
-          if (attempt < 3) await delay(1000)
-        }
-        checks.push({ target: profile.tunnelName, kind: 'handshake', ok: !!snapshot.tunnel.latestHandshake && now() / 1000 - snapshot.tunnel.latestHandshake < 180, checkedAt: new Date(now()).toISOString(), latencyMs: 0, detail: snapshot.tunnel.latestHandshake ? 'WIREGUARD_HANDSHAKE_AGE_CHECKED' : 'WIREGUARD_NO_HANDSHAKE' })
+    if (only === 'vpn' && profile.mode === 'home') record(snapshot.vpn.name || profile.vpnName, 'service', snapshot.vpn.connected, snapshot.vpn.connected ? 'VPN_CONNECTED' : 'VPN_UNAVAILABLE')
+    if (wants('vpn', 'management')) {
+      routeCheck(profile.gatewayAddress)
+      checks.push(await tcp(profile.gatewayAddress, profile.gatewayPort))
+    }
+    if (wants('proxy')) {
+      const external = await http(profile.externalProbeUrl, profile.proxyPort)
+      const desiredBypass = [profile.managementPrefix, ...(profile.containerEnabled ? [profile.containerPrefix] : [])]
+      if (!snapshot.proxy.available || snapshot.proxy.mode !== 'rule' || desiredBypass.some(prefix => !proxyBypassCovers(snapshot.proxy.bypassPrefixes, prefix))) {
+        external.ok = false
+        external.detail = 'PROXY_CONFIGURATION_MISMATCH'
       }
-      routeCheck(profile.containerProbeAddress, profile.tunnelName, profile.mode === 'work')
-      checks.push(containerProbe.ok ? containerProbe : await tcp(profile.containerProbeAddress, profile.containerProbePort))
+      checks.push(external)
+    }
+    if (profile.containerEnabled && profile.mode === 'home' && wants('relay', 'tunnel')) {
+      checks.push(await tcp(profile.gatewayAddress, profile.relayPort))
+      record(`127.0.0.1:${profile.relayLocalPort}`, 'relay', !!snapshot.tunnel.relayReady,
+        snapshot.tunnel.relayReady ? 'RELAY_READY' : snapshot.tunnel.taskStatus === 'unknown' ? 'RELAY_INSPECTION_UNKNOWN' : 'RELAY_NOT_READY')
+    }
+    if (profile.containerEnabled && wants('tunnel')) {
+      if (profile.mode === 'home') {
+        const before = snapshot.tunnel.receivedBytes
+        const targets = verificationTargets(profile)
+        let target = targets[0]!
+        let responded = false
+        for (let index = 0; index < targets.length && !responded; index += 4) {
+          checkDeadline()
+          const group = targets.slice(index, index + 4)
+          const responses = await Promise.all(group.map(item => item.protocol === 'tcp' ? tcp(item.address, item.port) : directHttp(item.address, item.port, item.protocol)))
+          const successful = responses.findIndex((response, i) => response.ok && hasContainerRoute(profile, snapshot, group[i]!.address))
+          if (successful >= 0) { target = group[successful]!; responded = true }
+        }
+        checkDeadline()
+        snapshot = (await observe(profile)).snapshot
+        checkDeadline()
+        const received = before !== undefined && snapshot.tunnel.receivedBytes !== undefined && snapshot.tunnel.receivedBytes > before
+        const handshake = snapshot.tunnel.latestHandshake
+        const authenticated = !!handshake && (now() / 1000 - handshake < 180 || received || responded)
+        const ready = snapshot.tunnel.running && !!snapshot.tunnel.relayReady && hasContainerRoute(profile, snapshot, target.address) && authenticated
+        record(profile.tunnelName, 'handshake', ready, ready ? 'WIREGUARD_AUTHENTICATED_PATH' : 'TUNNEL_NO_HANDSHAKE_OR_REPLY')
+      }
+      routeCheck(verificationTargets(profile)[0]!.address, true)
+    }
+    if ((profile.containerEnabled || profile.verificationTargets.length > 0) && wants('container')) {
+      const targets = verificationTargets(profile)
+      // Bounded fan-out, never a subnet scan. Each selected address gets its own result.
+      for (let index = 0; index < targets.length; index += 4) {
+        const group = targets.slice(index, index + 4)
+        if (profile.containerEnabled) for (const target of group) routeCheck(target.address, true)
+        checks.push(...await Promise.all(group.map(target => target.protocol === 'tcp'
+          ? tcp(target.address, target.port) : directHttp(target.address, target.port, target.protocol))))
+      }
     }
     return checks
+  }
+
+  async function waitForTransport(profile: NetworkProfile): Promise<NetworkProbe[]> {
+    const deadline = now() + profile.readinessTimeoutSeconds * 1000
+    let probes: NetworkProbe[] = []
+    const timedOut = (): NetworkProbe[] => [...probes, { target: profile.tunnelName, kind: 'handshake', ok: false, checkedAt: new Date(now()).toISOString(), latencyMs: 0, detail: 'TRANSPORT_READINESS_TIMEOUT' }]
+    do {
+      let timer: ReturnType<typeof setTimeout> | undefined
+      try {
+        probes = await Promise.race([verify(profile, 'tunnel', deadline), new Promise<NetworkProbe[]>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('TRANSPORT_READINESS_TIMEOUT')), Math.max(1, deadline - now()))
+        })])
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== 'TRANSPORT_READINESS_TIMEOUT') throw error
+        return timedOut()
+      } finally { if (timer) clearTimeout(timer) }
+      if (now() < deadline && probes.every(probe => probe.ok)) return probes
+      const remaining = deadline - now()
+      if (remaining <= 0) return timedOut()
+      await delay(Math.min(1000, remaining))
+    } while (now() < deadline)
+    return timedOut()
   }
 
   function currentValue(operation: Operation, observation: Observation): unknown {
@@ -552,10 +695,13 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
       const routes = raw.vpns.find(vpn => vpn.name === command.name && vpn.scope === command.scope)?.routes.filter(route => route.prefix === command.prefix) ?? []
       return !routes.length ? false : routes.length === 1 && routes[0]!.metric === 1 ? true : 'CONFLICT'
     }
-    if (command.action === 'service') return snapshot.tunnel.running
-    if (command.action === 'serviceStartup') return raw.service?.startType
-    if (command.action === 'task') return snapshot.tunnel.taskRunning
-    if (command.action === 'taskEnabled') return snapshot.tunnel.taskEnabled
+    if (command.action === 'service') return snapshot.tunnel.serviceStatus === 'unknown' ? 'CONFLICT' : snapshot.tunnel.running
+    if (command.action === 'serviceStartup') return snapshot.tunnel.serviceStatus === 'unknown' ? 'CONFLICT' : raw.service?.startType
+    if (command.action === 'task' || command.action === 'taskEnabled') {
+      if (!command.expectedTaskFingerprint || observation.relay?.task.status !== 'present'
+        || observation.relay.task.fingerprint !== command.expectedTaskFingerprint) return 'CONFLICT'
+      return command.action === 'task' ? observation.relay.task.state === 'Running' : observation.relay.task.enabled
+    }
     if (command.action === 'routeAdd' || command.action === 'routeRemove') {
       if (!operation.interfaceGuid || !raw.adapters.some(adapter => adapter.InterfaceIndex === command.interfaceIndex && adapter.InterfaceGuid === operation.interfaceGuid)) return 'CONFLICT'
       const routes = raw.routes.filter(route => route.prefix === command.prefix && route.interfaceIndex === command.interfaceIndex && route.nextHop === command.nextHop && route.store === command.store)
@@ -570,6 +716,13 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
       try {
         let restored = true
         if (entry.proxy) restored = await proxy.rollback(journal.profile, entry.proxy)
+        else if (entry.relayCreated) {
+          const observed = await relay.inspect(journal.profile)
+          if (observed.task.status !== 'missing') {
+            if (!entry.relayCreated.taskFingerprint || observed.task.fingerprint !== entry.relayCreated.taskFingerprint) restored = false
+            else await relay.remove(journal.profile, entry.relayCreated.taskFingerprint)
+          }
+        }
         else if (entry.operation) {
           const current = currentValue(entry.operation, await observe(journal.profile))
           if (JSON.stringify(current) === JSON.stringify(entry.operation.after)) await runner(entry.operation.inverse)
@@ -603,7 +756,7 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
     plan: profile => safe(async () => {
       const parsed = await resolveProfile(profile)
       const observation = await observe(parsed)
-      const stored = buildPlan(parsed, observation)
+      const stored = buildPlan({ ...parsed, vpnName: observation.snapshot.vpn.name || parsed.vpnName }, observation)
       for (const [id, item] of plans) if (Date.parse(item.plan.expiresAt) < now() || item.profile.id === parsed.id) plans.delete(id)
       if (plans.size > 32) plans.delete(plans.keys().next().value!)
       plans.set(stored.plan.id, stored)
@@ -616,6 +769,8 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
         const stored = plans.get(planId)
         if (!stored || Date.parse(stored.plan.expiresAt) < now()) throw new Error('PLAN_EXPIRED')
         if (!stored.plan.canApply) throw new Error('PLAN_BLOCKED')
+        const pending = await readJournal()
+        if (pending && ['applying', 'rollback-conflict'].includes(pending.status)) throw new Error('PLAN_STALE')
         const fresh = await observe(stored.profile)
         if (stableSnapshot(fresh) !== stored.fingerprint || fresh.snapshot.issues.includes('RECOVERY_REQUIRED')) throw new Error('PLAN_STALE')
         plans.delete(planId)
@@ -634,6 +789,24 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
               const outer = await tcp(stored.profile.gatewayAddress, stored.profile.relayPort)
               if (!outer.ok) throw new Error('RELAY_UNREACHABLE_CHECK_SOURCE_ACL')
             }
+            if (operation.id === 'relay-start' && stored.plan.changes.some(change => change.id === 'relay-register')) {
+              const before = await relay.inspect(stored.profile)
+              if (before.task.status !== 'missing' || before.binary.sha256 !== stored.observation.relay?.binary.sha256) throw new Error('FIELD_CHANGED')
+              const entry: JournalEntry = { id: 'relay-register', relayCreated: { binaryHash: before.binary.sha256! }, completed: false }
+              journal.entries.push(entry)
+              await writePrivateJson(journalPath, journal)
+              const created = await relay.create(stored.profile, before.binary.sha256!)
+              operation.command.expectedTaskFingerprint = created.taskFingerprint
+              operation.inverse.expectedTaskFingerprint = created.taskFingerprint
+              entry.relayCreated!.taskFingerprint = created.taskFingerprint
+              entry.completed = true
+              report.completedChanges.push('relay-register')
+              await writePrivateJson(journalPath, journal)
+            }
+            if (operation.id === 'vpn-split') {
+              const route = (await observe(stored.profile)).snapshot.selectedRoutes.find(item => item.target === stored.profile.gatewayAddress)
+              if (!route || route.interfaceAlias !== stored.profile.vpnName || Number(route.prefix.split('/')[1]) < Number(stored.profile.managementPrefix.split('/')[1])) throw new Error('VPN_RECONNECT_REQUIRED')
+            }
             const current = currentValue(operation, await observe(stored.profile))
             if (operation.command.action.startsWith('route') && JSON.stringify(current) === JSON.stringify(operation.after)) continue
             if (JSON.stringify(current) !== JSON.stringify(operation.before)) throw new Error('FIELD_CHANGED')
@@ -651,6 +824,10 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
             report.completedChanges.push(operation.id)
             await writePrivateJson(journalPath, journal)
           }
+          if (stored.profile.containerEnabled && stored.profile.mode === 'home') {
+            report.probes = await waitForTransport(stored.profile)
+            if (report.probes.some(probe => !probe.ok)) throw new Error('TRANSPORT_READINESS_TIMEOUT')
+          }
           if (stored.plan.changes.some(change => change.id === 'proxy-bypass')) {
             await proxy.apply(stored.profile, stored.observation.snapshot.proxy.configHash, async undo => {
               journal.entries.push({ id: 'proxy-bypass', proxy: undo, completed: false })
@@ -661,7 +838,15 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
             await writePrivateJson(journalPath, journal)
           }
           report.probes = await verify(stored.profile)
-          if (report.probes.some(probe => !probe.ok)) throw new Error('VERIFICATION_FAILED')
+          if (report.probes.some(probe => !probe.ok && (['route', 'handshake', 'relay'].includes(probe.kind)
+            || (probe.target === stored.profile.gatewayAddress && probe.port === stored.profile.gatewayPort)))) throw new Error('VERIFICATION_FAILED')
+          if (stored.profile.mode === 'work' && stored.operations.some(item => item.id === 'tunnel-stop')) {
+            const business = report.probes.filter(probe => ['tcp', 'http-direct'].includes(probe.kind) && probe.target !== stored.profile.gatewayAddress)
+            if (business.length && business.every(probe => !probe.ok)) throw new Error('VERIFICATION_FAILED')
+          }
+          if (report.probes.some(probe => !probe.ok && probe.kind === 'http-proxy')) report.issues.push('PROXY_NOT_VERIFIED')
+          if (report.probes.some(probe => !probe.ok && ['tcp', 'http-direct'].includes(probe.kind))) report.issues.push('BUSINESS_NOT_VERIFIED')
+          if (stored.plan.steps.some(step => step.code === 'vpnRoutePrepared')) report.issues.push('VPN_RECONNECT_REQUIRED')
           report.status = 'applied'
           const owned = journal.entries.flatMap(entry => entry.completed && entry.operation?.command.action === 'routeAdd' ? [entry.operation] : [])
           if (owned.length) await writePrivateJson(ownedRoutePath, { schemaVersion: 1, profile: stored.profile, operations: owned })
@@ -679,6 +864,11 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
     verify: profile => safe(async () => {
       if (platform !== 'win32') throw new Error('WINDOWS_REQUIRED')
       return verify(await resolveProfile(profile))
+    }),
+    verifyStep: (profile, step) => safe(async () => {
+      if (platform !== 'win32') throw new Error('WINDOWS_REQUIRED')
+      if (!['physical', 'vpn', 'management', 'proxy', 'relay', 'tunnel', 'container'].includes(step)) throw new Error('INVALID_NETWORK_STEP')
+      return verify(await resolveProfile(profile), step)
     }),
     probeHost: hostId => safe(async () => {
       if (!/^[0-9a-f-]{36}$/i.test(hostId)) throw new Error('INVALID_HOST_ID')
@@ -701,6 +891,15 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
       }
       return null
     }),
+    openSystemTool: target => safe(async () => {
+      if (platform !== 'win32') throw new Error('WINDOWS_REQUIRED')
+      if (!['tasks', 'services'].includes(target)) throw new Error('INVALID_NETWORK_SYSTEM_TOOL')
+      const windowsDir = process.env.SystemRoot || process.env.SYSTEMROOT || process.env.WINDIR || 'C:\\Windows'
+      if (!/^[a-z]:[\\/]/i.test(windowsDir)) throw new Error('NETWORK_SYSTEM_TOOL_OPEN_FAILED')
+      const error = await options.openPath(path.win32.join(windowsDir, 'System32', target === 'tasks' ? 'taskschd.msc' : 'services.msc'))
+      if (error) throw new Error('NETWORK_SYSTEM_TOOL_OPEN_FAILED')
+      return null
+    }),
     login: (target, input) => safe(async () => {
       if (platform !== 'win32') throw new Error('WINDOWS_REQUIRED')
       const profile = profileInput(input)
@@ -717,7 +916,7 @@ export function createNetworkManagerService(options: NetworkManagerOptions): Net
     vpnRouteOptions: () => safe(async () => {
       const observed = await observeBinding('1.1.1.1/32')
       if (observed.raw.issues.some(issue => issue.startsWith('vpn/'))) throw new Error('VPN_ROUTE_INSPECTION_INCOMPLETE')
-      return { vpns: observed.raw.vpns.map(vpn => ({ name: vpn.name, scope: vpn.scope as 'allUsers' | 'currentUser', connected: vpn.connected, splitTunneling: vpn.splitTunneling, routes: vpn.routes })) }
+      return { vpns: observed.raw.vpns.map(vpn => ({ name: vpn.name, serverAddress: vpn.serverAddress, scope: vpn.scope as 'allUsers' | 'currentUser', connected: vpn.connected, splitTunneling: vpn.splitTunneling, routes: vpn.routes })) }
     }),
     vpnRoutePreview: input => safe(async () => {
       const parsed = parseRoutePrefix(input.destination)

@@ -48,7 +48,7 @@ export function NetworkResults({ snapshot, plan, report, probes }: Props) {
     </section>}
     {report && <section className="space-y-2 rounded-[var(--radius-lg)] border border-[var(--color-border)] p-4" aria-label={t('networkManager.report')}>
       <h3 className="text-sm font-semibold">{t('networkManager.report')}</h3>
-      <Badge tone={report.status === 'applied' ? 'neutral' : 'warning'} wrap>{t(report.status === 'applied' ? 'networkManager.applied' : report.status === 'rolled-back' ? 'networkManager.rolledBack' : report.status === 'rollback-conflict' ? 'networkManager.rollbackConflict' : 'networkManager.failed')}</Badge>
+      <Badge tone={report.status === 'applied' && !report.issues.length ? 'neutral' : 'warning'} wrap>{t(report.status === 'applied' ? 'networkManager.applied' : report.status === 'rolled-back' ? 'networkManager.rolledBack' : report.status === 'rollback-conflict' ? 'networkManager.rollbackConflict' : 'networkManager.failed')}</Badge>
       {[...report.completedChanges, ...report.rollback, ...report.issues].map((text, index) => <p className="break-words text-xs" key={index}>{issueText(text)}</p>)}
     </section>}
     {probes.length > 0 && <section className="space-y-3 rounded-[var(--radius-lg)] border border-[var(--color-border)] p-4" aria-label={t('networkManager.checks')}>
@@ -56,9 +56,9 @@ export function NetworkResults({ snapshot, plan, report, probes }: Props) {
       {probes.map((probe, index) => <div key={index} className="space-y-1">
         <div className="flex flex-wrap items-center gap-2">
           <Badge tone={probe.ok ? 'success' : 'danger'}>{t(probe.ok ? 'networkManager.passed' : 'networkManager.failed')}</Badge>
-          <span className="break-words text-sm">{probe.target}{probe.port ? `:${probe.port}` : ''} · {probe.kind} · {probe.latencyMs} ms</span>
+          <span className="break-words text-sm">{probe.target}{probe.port && !/^https?:\/\//.test(probe.target) ? `:${probe.port}` : ''} · {probe.kind} · {probe.latencyMs} ms</span>
         </div>
-        <p className="break-words text-xs">{probe.detail}</p>
+        <p className="break-words text-xs">{issueText(probe.detail)}</p>
         {(probe.source || probe.interfaceAlias) && <p className="text-xs text-[var(--color-text-secondary)]">{t('networkManager.source')}: {probe.source} · {probe.interfaceAlias}</p>}
         <p className="text-xs text-[var(--color-text-tertiary)]">{t('networkManager.observedAt', { time: new Date(probe.checkedAt).toLocaleTimeString() })}</p>
       </div>)}

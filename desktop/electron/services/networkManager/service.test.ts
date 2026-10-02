@@ -6,6 +6,7 @@ import { createNetworkManagerService } from './service'
 import { createDefaultNetworkProfiles, type NetworkProbe, type NetworkResult } from '../../../src/features/network-manager/networkTypes'
 import { hash, type ProxyAdapter } from './proxy'
 import type { NetworkCommand } from './powershell'
+import type { RelayRecoveryInspection } from './relayRecovery'
 
 const directories: string[] = []
 afterEach(async () => { await Promise.all(directories.splice(0).map(directory => fs.rm(directory, { recursive: true, force: true }))) })
@@ -25,23 +26,25 @@ async function fixture(mode: 'home' | 'work' = 'home', linkedRouteStores = false
     addresses: [{ InterfaceIndex: 4, IPAddress: mode === 'work' ? '191.168.3.50' : '192.168.1.50', PrefixLength: 21 }, { InterfaceIndex: 47, IPAddress: '162.168.1.2', PrefixLength: 32 }],
     adapters: [{ InterfaceIndex: 4, InterfaceGuid: 'physical-guid', Status: 'Up' }],
     routes: [] as { prefix: string; nextHop: string; interfaceIndex: number; interfaceAlias: string; metric: number; store: string }[],
-    vpns: [{ name: profile.vpnName, scope: profile.vpnScope, connected: true, splitTunneling: true, routes: [{ prefix: profile.managementPrefix, metric: 1 }] }],
+    vpns: [{ name: profile.vpnName, serverAddress: profile.vpnServerAddress, scope: profile.vpnScope, connected: true, splitTunneling: true, routes: [{ prefix: profile.managementPrefix, metric: 1 }] }],
     selected: [
       { target: profile.gatewayAddress, source: mode === 'home' ? '162.168.1.2' : '191.168.3.50', interfaceIndex: mode === 'home' ? 47 : 4, interfaceAlias: mode === 'home' ? profile.vpnName : 'Ethernet', prefix: mode === 'home' ? profile.managementPrefix : '191.168.0.0/21', nextHop: '0.0.0.0' },
       { target: profile.containerProbeAddress, source: mode === 'home' ? '10.78.62.2' : '191.168.3.50', interfaceIndex: mode === 'home' ? 51 : 4, interfaceAlias: mode === 'home' ? profile.tunnelName : 'Ethernet', prefix: profile.containerPrefix, nextHop: mode === 'home' ? '0.0.0.0' : profile.gatewayAddress },
       { target: '1.1.1.1', source: '192.168.1.50', interfaceIndex: 4, interfaceAlias: 'Ethernet', prefix: '0.0.0.0/0', nextHop: '192.168.1.1' },
     ],
     service: { Name: `WireGuardTunnel$${profile.tunnelName}`, status: 'Running', startType: 'Automatic' },
-    task: { TaskName: profile.relayTaskName, state: 'Running', enabled: true },
-    handshakes: [Math.floor(timestamp / 1000)], admin: true, issues: [],
+    task: { TaskName: profile.relayTaskName, state: 'Running', enabled: true } as { TaskName: string; state: string; enabled: boolean } | null,
+    handshakes: [Math.floor(timestamp / 1000)], receivedBytes: 100, sentBytes: 100, admin: true, issues: [] as string[],
   }
   const commands: NetworkCommand[] = []
   let afterCommand: ((command: NetworkCommand) => void | Promise<void>) | undefined
   let afterTcp: ((target: string) => void) | undefined
   let tcpPass = true
+  const failedTargets = new Set<string>()
   const tcp = async (target: string, port: number): Promise<NetworkProbe> => {
     afterTcp?.(target)
-    return { target, port, kind: 'tcp', ok: tcpPass, checkedAt: new Date(timestamp).toISOString(), latencyMs: 1, detail: tcpPass ? 'TCP_CONNECTED' : 'TCP_UNREACHABLE' }
+    const ok = tcpPass && !failedTargets.has(target)
+    return { target, port, kind: 'tcp', ok, checkedAt: new Date(timestamp).toISOString(), latencyMs: 1, detail: ok ? 'TCP_CONNECTED' : 'TCP_UNREACHABLE' }
   }
   const proxyState = { available: true, mode: 'rule', tunEnabled: false, controller: 'http://127.0.0.1:39797', bypassPrefixes: [profile.managementPrefix, profile.containerPrefix], configHash: hash('original') }
   const proxy: ProxyAdapter = {
@@ -65,8 +68,8 @@ async function fixture(mode: 'home' | 'work' = 'home', linkedRouteStores = false
       case 'vpnRouteRemove': state.vpns[0]!.routes = state.vpns[0]!.routes.filter(route => route.prefix !== command.prefix); break
       case 'service': state.service.status = command.running ? 'Running' : 'Stopped'; break
       case 'serviceStartup': state.service.startType = String(command.startType); break
-      case 'task': state.task.state = command.running ? 'Running' : 'Ready'; break
-      case 'taskEnabled': state.task.enabled = Boolean(command.enabled); break
+      case 'task': state.task!.state = command.running ? 'Running' : 'Ready'; break
+      case 'taskEnabled': state.task!.enabled = Boolean(command.enabled); break
       case 'routeAdd': {
         const route = { prefix: String(command.prefix), nextHop: String(command.nextHop), interfaceIndex: Number(command.interfaceIndex), interfaceAlias: 'Ethernet', metric: Number(command.metric), store: String(command.store) }
         state.routes.push(route)
@@ -80,22 +83,204 @@ async function fixture(mode: 'home' | 'work' = 'home', linkedRouteStores = false
     return null
   }
   let clock = timestamp
-  const service = createNetworkManagerService({ configDir: directory, platform: 'win32', runner, proxy, tcp,
+  const relayState: RelayRecoveryInspection = {
+    checkedAt: new Date(timestamp).toISOString(), binary: { status: 'present', path: profile.relayExecutable, sha256: hash('fixture-binary'), secureAcl: true },
+    task: { status: 'present', fingerprint: hash('fixture-task'), definitionMatches: true, state: 'Running', enabled: true },
+    udp: { status: 'ready', pid: 123, executablePath: profile.relayExecutable, processPriority: 'Normal' }, tcp: { status: 'ready', pid: 123 }, issues: [],
+  }
+  let readyAt = 0
+  const relay = {
+    inspect: async () => ({ ...structuredClone(relayState),
+      task: { ...relayState.task, status: relayState.task.status === 'unknown' ? 'unknown' as const : state.task ? 'present' as const : 'missing' as const,
+        state: state.task?.state ?? null, enabled: state.task?.enabled ?? null, fingerprint: state.task ? relayState.task.fingerprint : null },
+      udp: readyAt && clock < readyAt ? { status: 'missing' as const } : relayState.udp,
+    }),
+    create: async () => { commands.push({ action: 'relayTaskCreate' }); state.task = { TaskName: profile.relayTaskName, state: 'Ready', enabled: true }; return { taskFingerprint: relayState.task.fingerprint! } },
+    remove: async () => { commands.push({ action: 'relayTaskRemove' }); state.task = null },
+  }
+  const service = createNetworkManagerService({ configDir: directory, platform: 'win32', runner, proxy, tcp, relay,
     http: async target => ({ target, kind: 'http-proxy', ok: true, checkedAt: new Date(timestamp).toISOString(), latencyMs: 1, detail: 'EXPLICIT_PROXY_HTTP_RESPONSE' }),
-    now: () => clock, delay: async () => undefined,
+    now: () => clock, delay: async milliseconds => { clock += milliseconds },
     resolveHost: async id => id === '11111111-1111-4111-8111-111111111111' ? { id, name: 'fixture', address: '191.168.7.62', port: 2222 } : null,
     openExternal: async url => { commands.push({ action: 'openExternal', url }) }, openPath: async file => { commands.push({ action: 'openPath', file }); return '' },
   })
-  return { directory, profile, state, commands, service, proxyState, discoveryState, setAfterCommand: (callback: typeof afterCommand) => { afterCommand = callback }, setAfterTcp: (callback: typeof afterTcp) => { afterTcp = callback }, setTcp: (pass: boolean) => { tcpPass = pass }, setClock: (value: number) => { clock = value }, timestamp }
+  return { directory, profile, state, commands, service, proxyState, discoveryState, relayState, failedTargets, setReadyAt: (value: number) => { readyAt = value }, setAfterCommand: (callback: typeof afterCommand) => { afterCommand = callback }, setAfterTcp: (callback: typeof afterTcp) => { afterTcp = callback }, setTcp: (pass: boolean) => { tcpPass = pass }, setClock: (value: number) => { clock = value }, timestamp }
 }
 
 describe('network manager deterministic orchestration', () => {
+  it('resolves a renamed corporate VPN by server and preserves its full-tunnel policy', async () => {
+    const f = await fixture()
+    f.state.vpns[0]!.name = '公司'
+    f.state.vpns[0]!.splitTunneling = false
+    f.state.vpns[0]!.routes = []
+    f.state.interfaces[1]!.InterfaceAlias = '公司'
+    Object.assign(f.state.selected[0]!, { interfaceAlias: '公司', prefix: '0.0.0.0/0' })
+    const planned = unwrap(await f.service.plan(f.profile))
+    expect(planned.snapshot.vpn).toMatchObject({ name: '公司', serverAddress: f.profile.vpnServerAddress })
+    expect(planned.plan.canApply).toBe(true)
+    expect(unwrap(await f.service.apply(planned.plan.id)).status).toBe('applied')
+    expect(f.commands).toEqual([])
+    expect(f.state.vpns[0]!.splitTunneling).toBe(false)
+  })
+
+  it('allows manual endpoint testing without a container tunnel or saved SSH host', async () => {
+    const f = await fixture()
+    f.profile.containerEnabled = false
+    f.profile.verificationTargets = [{ id: 'business', label: 'business', address: '10.0.0.199', port: 8070, protocol: 'tcp' }]
+    const probes = unwrap(await f.service.verifyStep(f.profile, 'container'))
+    expect(probes).toHaveLength(1)
+    expect(probes[0]).toMatchObject({ kind: 'tcp', target: '10.0.0.199', port: 8070, ok: true })
+    expect(f.commands).toEqual([])
+  })
+
+  it('requires an exact choice for ambiguous VPNs and does not interpret failed collection as missing', async () => {
+    const f = await fixture()
+    f.state.vpns[0]!.name = '公司A'
+    f.state.vpns.push({ ...f.state.vpns[0]!, name: '公司B' })
+    expect(unwrap(await f.service.plan(f.profile)).plan.steps).toContainEqual(expect.objectContaining({ code: 'vpnAmbiguous' }))
+    f.state.issues = ['vpn/allUsers: ACCESS_DENIED']
+    expect(unwrap(await f.service.plan(f.profile)).snapshot.vpn.status).toBe('unknown')
+    expect(f.commands).toEqual([])
+  })
+
+  it('restores a missing relay task from reviewed safe binary and waits for delayed port readiness', async () => {
+    const f = await fixture()
+    f.state.task = null
+    f.setReadyAt(f.timestamp + 20_000)
+    const plan = unwrap(await f.service.plan(f.profile)).plan
+    expect(plan.changes).toContainEqual(expect.objectContaining({ id: 'relay-register' }))
+    expect(plan.execution!.find(item => item.id === 'relay-register')!.command).toMatchObject({ action: 'relayTaskCreate',
+      relayLocalPort: f.profile.relayLocalPort, gatewayAddress: f.profile.gatewayAddress, relayPort: f.profile.relayPort })
+    expect(plan.execution!.find(item => item.id === 'relay-start')!.command.expectedTaskFingerprint).toBe('<created-task fingerprint>')
+    expect(unwrap(await f.service.apply(plan.id)).status).toBe('applied')
+    expect(f.commands.map(command => command.action)).toEqual(['relayTaskCreate', 'task'])
+    expect(unwrap(await f.service.plan(f.profile)).plan.changes.some(change => change.id === 'relay-register')).toBe(false)
+  })
+
+  it.each(['unknown', 'unsafe', 'definition'])('blocks task restoration when evidence is %s', async evidence => {
+    const f = await fixture()
+    if (evidence === 'unknown') f.relayState.task.status = 'unknown'
+    else if (evidence === 'unsafe') { f.state.task = null; f.relayState.binary.secureAcl = false }
+    else f.relayState.task.definitionMatches = false
+    const plan = unwrap(await f.service.plan(f.profile)).plan
+    expect(plan.canApply).toBe(false)
+    expect(await f.service.apply(plan.id)).toMatchObject({ ok: false, error: { code: 'PLAN_BLOCKED' } })
+    expect(f.commands).toHaveLength(0)
+  })
+
+  it('keeps unreadable UDP/TCP evidence unknown rather than reporting a failed listener', async () => {
+    const f = await fixture()
+    f.relayState.udp.status = 'unknown'
+    f.relayState.tcp.status = 'unknown'
+    const snapshot = unwrap(await f.service.inspect(f.profile))
+    expect(snapshot.tunnel.taskStatus).toBe('present')
+    expect(snapshot.tunnel.udpListening).toBeUndefined()
+    expect(snapshot.tunnel.tcpConnected).toBeUndefined()
+    expect(snapshot.tunnel.relayReady).toBeUndefined()
+  })
+
+  it('rolls back only the newly created task on readiness timeout and retains existing running task', async () => {
+    const f = await fixture()
+    f.profile.readinessTimeoutSeconds = 10
+    f.state.task = null
+    f.relayState.udp.status = 'missing'
+    const report = unwrap(await f.service.apply(unwrap(await f.service.plan(f.profile)).plan.id))
+    expect(report).toMatchObject({ status: 'rolled-back', issues: ['TRANSPORT_READINESS_TIMEOUT'] })
+    expect(f.state.task).toBeNull()
+    expect(f.commands.map(command => command.action)).toEqual(['relayTaskCreate', 'task', 'task', 'relayTaskRemove'])
+    const existing = await fixture()
+    existing.profile.readinessTimeoutSeconds = 10
+    existing.relayState.udp.status = 'missing'
+    expect(unwrap(await existing.service.apply(unwrap(await existing.service.plan(existing.profile)).plan.id)).issues).toContain('TRANSPORT_READINESS_TIMEOUT')
+    expect(existing.commands).toHaveLength(0)
+    expect(existing.state.task!.state).toBe('Running')
+  })
+
+  it('does not accept a successful observation that finishes after the readiness deadline', async () => {
+    const f = await fixture()
+    f.profile.readinessTimeoutSeconds = 10
+    f.setAfterTcp(target => { if (target === f.profile.containerProbeAddress) f.setClock(f.timestamp + 10_001) })
+    const report = unwrap(await f.service.apply(unwrap(await f.service.plan(f.profile)).plan.id))
+    expect(report.issues).toContain('TRANSPORT_READINESS_TIMEOUT')
+    expect(report.status).toBe('rolled-back')
+  })
+
+  it('tests selected targets instead of a retired legacy container and retains healthy transport for business failures', async () => {
+    const f = await fixture()
+    f.state.handshakes = [Math.floor(f.timestamp / 1000) - 600]
+    f.failedTargets.add(f.profile.containerProbeAddress)
+    f.profile.verificationTargets = [{ id: 'live', label: 'current container', address: '10.204.19.99', port: 22, protocol: 'tcp' }]
+    f.state.selected.push({ ...f.state.selected[1]!, target: '10.204.19.99' })
+    expect(unwrap(await f.service.apply(unwrap(await f.service.plan(f.profile)).plan.id)).status).toBe('applied')
+    f.state.handshakes = [Math.floor(f.timestamp / 1000)]
+    f.failedTargets.add('10.204.19.99')
+    const report = unwrap(await f.service.apply(unwrap(await f.service.plan(f.profile)).plan.id))
+    expect(report).toMatchObject({ status: 'applied', issues: ['BUSINESS_NOT_VERIFIED'] })
+    expect(f.state.service.status).toBe('Running')
+  })
+
+  it('preserves disconnected office routes without treating them as an active home conflict', async () => {
+    const f = await fixture()
+    f.state.interfaces.push({ InterfaceIndex: 19, InterfaceAlias: '有线1', ConnectionState: 2, InterfaceMetric: 1 })
+    f.state.routes.push({ prefix: '10.204.19.81/32', nextHop: f.profile.gatewayAddress, interfaceIndex: 19, interfaceAlias: '有线1', metric: 1, store: 'PersistentStore' })
+    const plan = unwrap(await f.service.plan(f.profile)).plan
+    expect(plan.canApply).toBe(true)
+    expect(unwrap(await f.service.apply(plan.id)).status).toBe('applied')
+    expect(f.state.routes).toHaveLength(1)
+    expect(f.commands).toHaveLength(0)
+  })
+
+  it('prepares profile route before requesting reconnect and never removes the working VPN default early', async () => {
+    const f = await fixture()
+    f.profile.splitTunnelingPolicy = 'enabled'
+    f.state.vpns[0]!.routes = []
+    f.state.vpns[0]!.splitTunneling = false
+    f.state.selected[0]!.prefix = '0.0.0.0/0'
+    const report = unwrap(await f.service.apply(unwrap(await f.service.plan(f.profile)).plan.id))
+    expect(report).toMatchObject({ status: 'applied', issues: ['VPN_RECONNECT_REQUIRED'] })
+    expect(f.commands.map(command => command.action)).toEqual(['vpnRouteAdd'])
+    expect(f.state.vpns[0]!.splitTunneling).toBe(false)
+    expect(unwrap(await f.service.plan(f.profile)).plan.canApply).toBe(false)
+  })
+
+  it('adds the work route to the current physical adapter while preserving a disconnected old adapter route', async () => {
+    const f = await fixture('work')
+    f.state.interfaces.push({ InterfaceIndex: 19, InterfaceAlias: 'old cable', ConnectionState: 2, InterfaceMetric: 1 })
+    f.state.routes.push({ prefix: f.profile.containerPrefix, nextHop: f.profile.gatewayAddress, interfaceIndex: 19, interfaceAlias: 'old cable', metric: 5, store: 'PersistentStore' })
+    const plan = unwrap(await f.service.plan(f.profile)).plan
+    expect(plan.canApply).toBe(true)
+    expect(unwrap(await f.service.apply(plan.id)).status).toBe('applied')
+    expect(f.state.routes.map(route => route.interfaceIndex).sort()).toEqual([19, 4, 4])
+    expect(f.commands.some(command => command.action === 'routeRemove' && command.interfaceIndex === 19)).toBe(false)
+  })
+
+  it('preserves a task changed by another writer between enable and start, including during rollback', async () => {
+    const f = await fixture()
+    Object.assign(f.state.task!, { state: 'Ready', enabled: false })
+    f.setAfterCommand(command => { if (command.action === 'taskEnabled') f.relayState.task.fingerprint = hash('third-party-task') })
+    const report = unwrap(await f.service.apply(unwrap(await f.service.plan(f.profile)).plan.id))
+    expect(report.status).toBe('rollback-conflict')
+    expect(f.commands.map(command => command.action)).toEqual(['taskEnabled'])
+    expect(f.state.task!.state).toBe('Ready')
+  })
+
+  it('restores the previous dedicated tunnel if a work switch cannot reach any business target', async () => {
+    const f = await fixture('work')
+    f.failedTargets.add(f.profile.containerProbeAddress)
+    const report = unwrap(await f.service.apply(unwrap(await f.service.plan(f.profile)).plan.id))
+    expect(report.status).toBe('rolled-back')
+    expect(f.state.service.status).toBe('Running')
+    expect(f.state.task!.state).toBe('Running')
+    expect(f.state.routes).toEqual([])
+  })
+
   it('returns a read-only catalogue and the exact native command/inverse of a reviewed plan', async () => {
     const f = await fixture()
     const catalog = unwrap(await f.service.executionCatalog())
     expect(catalog.actions.some(action => action.id === 'split' && action.script.includes('Set-VpnConnection'))).toBe(true)
     expect(f.commands).toHaveLength(0)
     f.state.vpns[0]!.splitTunneling = false
+    f.profile.splitTunnelingPolicy = 'enabled'
     const plan = unwrap(await f.service.plan(f.profile)).plan
     const execution = plan.execution!.find(item => item.id === 'vpn-split')!
     expect(execution.command).toMatchObject({ action: 'split', enabled: true })
@@ -195,6 +380,7 @@ describe('network manager deterministic orchestration', () => {
 
   it('journals before mutation and reverses a command that partially succeeds then throws', async () => {
     const f = await fixture()
+    f.profile.splitTunnelingPolicy = 'enabled'
     f.state.vpns[0]!.splitTunneling = false
     let failed = false
     f.setAfterCommand(async command => {
@@ -214,6 +400,7 @@ describe('network manager deterministic orchestration', () => {
 
   it('preserves a route edited by another writer during failure rollback', async () => {
     const f = await fixture()
+    f.profile.splitTunnelingPolicy = 'enabled'
     f.state.vpns[0]!.routes = []
     f.setAfterCommand(command => {
       if (command.action === 'vpnRouteAdd') { f.state.vpns[0]!.routes[0]!.metric = 99; throw new Error('INJECTED_FAILURE') }
@@ -226,12 +413,13 @@ describe('network manager deterministic orchestration', () => {
 
   it('recovers an interrupted inverse once and does not replay already-restored entries', async () => {
     const f = await fixture()
+    f.profile.splitTunnelingPolicy = 'enabled'
     f.state.vpns[0]!.splitTunneling = false
     f.state.vpns[0]!.routes = []
     let restorationFailed = false
     f.setAfterCommand(command => {
-      if (command.action === 'vpnRouteAdd') throw new Error('INJECTED_FAILURE')
-      if (command.action === 'split' && !command.enabled && !restorationFailed) { restorationFailed = true; throw new Error('INJECTED_RESTORE_FAILURE') }
+      if (command.action === 'split' && command.enabled) throw new Error('INJECTED_FAILURE')
+      if (command.action === 'vpnRouteRemove' && !restorationFailed) { restorationFailed = true; throw new Error('INJECTED_RESTORE_FAILURE') }
     })
     expect(unwrap(await f.service.apply(unwrap(await f.service.plan(f.profile)).plan.id)).status).toBe('rollback-conflict')
     expect(unwrap(await f.service.plan(f.profile)).plan.steps.some(step => step.code === 'recoveryRequired')).toBe(true)
@@ -245,7 +433,7 @@ describe('network manager deterministic orchestration', () => {
     let report = unwrap(await f.service.apply(unwrap(await f.service.plan(f.profile)).plan.id))
     expect(report.status).toBe('applied')
     expect(f.state.service.status).toBe('Stopped')
-    expect(f.state.task.enabled).toBe(false)
+    expect(f.state.task!.enabled).toBe(false)
     expect(f.state.vpns[0]!.connected).toBe(true)
     expect(f.state.routes.map(route => route.store).sort()).toEqual(['ActiveStore', 'PersistentStore'])
     const home = { ...f.profile, id: 'home', mode: 'home' as const }
@@ -299,6 +487,7 @@ describe('network manager deterministic orchestration', () => {
 
   it('opens OS login without credentials and blocks a concurrent apply', async () => {
     const f = await fixture()
+    f.profile.splitTunnelingPolicy = 'enabled'
     unwrap(await f.service.login('vpn', f.profile))
     expect(f.commands[0]).toEqual({ action: 'openExternal', url: 'ms-settings:network-vpn' })
     f.state.vpns[0]!.splitTunneling = false

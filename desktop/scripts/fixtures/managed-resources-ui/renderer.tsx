@@ -14,8 +14,9 @@ declare global {
   interface Window {
     m2FixtureBridge: ElectronHostBridge
     m2Smoke: {
-      snapshot: () => { tabs: string[]; hosts: unknown[]; tags: unknown[]; selectedHostId: string | null }
+      snapshot: () => { tabs: string[]; hosts: unknown[]; tags: unknown[]; selectedHostId: string | null; selectedTagId: string | null; searchQuery: string }
       label: typeof t
+      setLocale: (locale: 'en' | 'zh') => void
     }
   }
 }
@@ -24,11 +25,14 @@ useSettingsStore.setState({ locale: 'en' })
 runDesktopPersistenceMigrations()
 window.m2Smoke = {
   label: t,
+  setLocale: locale => useSettingsStore.setState({ locale }),
   snapshot: () => ({
     tabs: useTabStore.getState().tabs.map(tab => tab.sessionId),
     hosts: useHostManagementStore.getState().hosts,
     tags: useHostManagementStore.getState().tags,
     selectedHostId: useHostManagementStore.getState().selectedHostId,
+    selectedTagId: useHostManagementStore.getState().selectedTagId,
+    searchQuery: useHostManagementStore.getState().searchQuery,
   }),
 }
 

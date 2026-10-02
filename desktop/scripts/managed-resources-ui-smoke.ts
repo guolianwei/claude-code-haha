@@ -46,6 +46,7 @@ try {
   console.error(error instanceof Error ? error.message : String(error))
 } finally {
   // Only this run's uniquely-created sandbox is ever removed.
+  if (path.dirname(sandbox) !== os.tmpdir() || !path.basename(sandbox).startsWith('cc-haha-m2-native-')) throw new Error('Unexpected managed-resources fixture sandbox path')
   await fs.rm(sandbox, { recursive: true, force: true, maxRetries: 10, retryDelay: 250 })
 }
 process.exit(result)

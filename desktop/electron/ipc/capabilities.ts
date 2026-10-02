@@ -3,7 +3,7 @@ import { NetworkRequestSchema } from '../../src/features/network-manager/network
 import { HostToolsInputSchema } from '../../src/features/managed-resources/api/hostToolsApi'
 import { ApplicationOperationInputSchema } from '../../src/features/managed-resources/api/applicationOperationsApi'
 import { ELECTRON_IPC_CHANNELS, type ElectronIpcChannel } from './channels'
-import { FolderTransferInputSchema, RevealCredentialInputSchema, SaveHostInputSchema, SaveApplicationInputSchema } from '../../src/features/managed-resources/api/hostManagementApi'
+import { CopyTagConnectionsInputSchema, FolderTransferInputSchema, RevealCredentialInputSchema, SaveHostInputSchema, SaveApplicationInputSchema } from '../../src/features/managed-resources/api/hostManagementApi'
 import {
   CloseDataSessionInputSchema,
   DeleteDataConnectionInputSchema,
@@ -598,6 +598,7 @@ export const ELECTRON_IPC_VALIDATORS = {
   [ELECTRON_IPC_CHANNELS.mrSaveCredential]: optionalRecord,
   [ELECTRON_IPC_CHANNELS.mrDeleteCredential]: optionalRecord,
   [ELECTRON_IPC_CHANNELS.mrRevealCredential]: value => RevealCredentialInputSchema.safeParse(value).success,
+  [ELECTRON_IPC_CHANNELS.mrCopyTagConnections]: value => CopyTagConnectionsInputSchema.safeParse(value).success,
   [ELECTRON_IPC_CHANNELS.mrProvideTemporaryCredential]: optionalRecord,
   [ELECTRON_IPC_CHANNELS.mrListConcepts]: optionalRecord,
   [ELECTRON_IPC_CHANNELS.mrGetConcept]: optionalRecord,

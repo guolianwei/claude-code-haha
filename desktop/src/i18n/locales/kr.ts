@@ -1,3 +1,5 @@
+import { networkPathKr } from '../../features/network-manager/i18n/pathStrings'
+import { networkRecoveryKr } from '../../features/network-manager/i18n/recoveryStrings'
 import { networkExecutionKr } from '../../features/network-manager/i18n/executionStrings'
 import { m2Kr } from '../../features/managed-resources/i18n/m2Strings'
 import type {
@@ -5,7 +7,14 @@ import type {
 
 export const kr: Record<TranslationKey, string> = {
   ...m2Kr,
+  'managedResources.tagCopy.action': '“{name}” 태그의 모든 서버 연결 정보 복사 (Markdown)',
+  'managedResources.tagCopy.success': '호스트 {hostCount}개, 계정 {accountCount}개의 연결 정보를 복사했습니다 (Markdown).',
+  'managedResources.tagCopy.failed': '복사하지 못했습니다. 다시 시도해 주세요.',
+  'managedResources.tagCopy.empty': '이 태그에 복사할 서버가 없습니다.',
+  'managedResources.tagCopy.changed': '태그 또는 연결 정보가 변경되었습니다. 다시 복사해 주세요.',
   ...networkExecutionKr,
+  ...networkRecoveryKr,
+  ...networkPathKr,
   "networkManager.vpnRouteTitle": "대상 주소를 Windows VPN에 연결",
   "networkManager.vpnRouteHint": "기존 Windows VPN을 선택하고 IPv4 주소 또는 CIDR 범위를 최대 32개 입력하세요. 모든 대상을 검사한 후 안전할 때만 일괄 적용합니다. SakuraCat DIRECT 및 실제 연결은 별도로 확인해야 합니다.",
   "networkManager.vpnRouteDestination": "대상 IP 또는 CIDR 목록",

@@ -430,6 +430,11 @@ export const RevealCredentialInputSchema = z.object({
   id: IdSchema,
 }).strict()
 
+export const CopyTagConnectionsInputSchema = z.object({
+  ownerId: OptionalOwnerIdSchema,
+  tagId: IdSchema,
+}).strict()
+
 export const ConceptInputSchema = z.discriminatedUnion('mode', [
   z.object({
     mode: z.literal('create'),
@@ -845,6 +850,8 @@ export type HostManagementHostApi = {
   ): Promise<HostManagementResult<CredentialRecordSummary>>
   deleteCredential(id: string, expectedRevision: number): Promise<HostManagementResult<{ id: string }>>
   revealCredential(id: string): Promise<HostManagementResult<RevealedPasswordCredential>>
+  /** Native clipboard operation. Passwords and Markdown never cross into the renderer. */
+  copyTagConnections(tagId: string): Promise<HostManagementResult<{ hostCount: number; accountCount: number }>>
   provideTemporaryCredential(
     hostId: string,
     secret: CredentialSecretInput

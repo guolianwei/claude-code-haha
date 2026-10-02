@@ -11,6 +11,8 @@ describe('compiled network execution reference', () => {
     expect(script).not.toContain("'routeRemove'")
     expect(networkScriptBranch('split')).toContain('function VpnArgs')
     expect(networkScriptBranch('proxyDiscover')).toContain('function Get-SakuraProcesses')
+    expect(networkScriptBranch('task')).toContain('function Confirm-RelayTaskFingerprint')
+    expect(networkScriptBranch('taskEnabled')).toContain('expectedTaskFingerprint')
   })
   it('lists every native branch plus relevant non-script functions', () => {
     const catalog = getNetworkExecutionCatalog()
@@ -18,6 +20,8 @@ describe('compiled network execution reference', () => {
     expect(catalog.actions.find(action => action.id === 'probeHost')?.functionName).toContain('resolveHost')
     expect(catalog.actions.find(action => action.id === 'proxy-bypass')?.script).toContain('[REDACTED]')
     expect(catalog.actions.find(action => action.id === 'vpnBinding')?.functionName).toContain('activateBinding')
+    expect(catalog.actions.find(action => action.id === 'verifyStep')?.kind).toBe('probe')
+    expect(catalog.actions.find(action => action.id === 'vpnRouteOptions')?.kind).toBe('read')
     expect(new Set(catalog.actions.map(action => action.id)).size).toBe(catalog.actions.length)
     expect(() => networkScriptBranch('arbitrary')).toThrow('UNKNOWN_NETWORK_SCRIPT_ACTION')
   })

@@ -159,6 +159,7 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       discoverProxy: proxyPort => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'discoverProxy', proxyPort }),
       executionCatalog: () => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'executionCatalog' }),
       openNetworkConnections: () => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'openNetworkConnections' }),
+      openSystemTool: target => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'openSystemTool', target }),
       list: () => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'list' }),
       save: (profile, expectedRevision) => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'save', profile, expectedRevision }),
       inspect: profile => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'inspect', profile }),
@@ -166,6 +167,7 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       apply: planId => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'apply', planId }),
       recover: () => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'recover' }),
       verify: profile => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'verify', profile }),
+      verifyStep: (profile, step) => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'verifyStep', profile, step }),
       probeHost: hostId => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'probeHost', hostId }),
       login: (target, profile) => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'login', target, profile }),
       vpnRouteOptions: () => invoke(ELECTRON_IPC_CHANNELS.networkManager, { action: 'vpnRouteOptions' }),
@@ -389,6 +391,7 @@ export function createElectronHost(bridge: ElectronHostBridge): DesktopHost {
       saveCredential: input => invoke(ELECTRON_IPC_CHANNELS.mrSaveCredential, input),
       deleteCredential: (id, expectedRevision) => invoke(ELECTRON_IPC_CHANNELS.mrDeleteCredential, { id, expectedRevision }),
       revealCredential: id => invoke(ELECTRON_IPC_CHANNELS.mrRevealCredential, { id }),
+      copyTagConnections: tagId => invoke(ELECTRON_IPC_CHANNELS.mrCopyTagConnections, { tagId }),
       provideTemporaryCredential: (hostId, secret) => invoke(ELECTRON_IPC_CHANNELS.mrProvideTemporaryCredential, { hostId, secret }),
       exportMetadata: () => invokeProjected(
         ELECTRON_IPC_CHANNELS.mrExportMetadata, undefined,

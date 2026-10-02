@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { browserHost } from '@/lib/desktopHost/browserHost'
@@ -21,7 +21,7 @@ describe('network configuration workflow', () => {
     fireEvent.click(validate)
     await waitFor(() => expect(within(validate.closest('section')!).getByText('Validated')).toBeVisible())
   })
-  afterEach(() => { cleanup(); delete window.desktopHost })
+  afterEach(() => { cleanup(); vi.useRealTimers(); delete window.desktopHost })
   it('keeps selecting work mode read-only and invalidates a preview on edits', async () => {
     const fixture = createNetworkFixture()
     render(<NetworkManagerPanel api={fixture.api} />)
@@ -77,7 +77,8 @@ describe('network configuration workflow', () => {
     await waitFor(() => expect(fixture.calls.filter(call => call.action === 'inspect')).toHaveLength(3))
 
     fireEvent.click(screen.getByRole('button', { name: 'Validate container network' }))
-    await waitFor(() => expect(fixture.calls.filter(call => call.action === 'verify')).toHaveLength(1))
+    await waitFor(() => expect(fixture.calls.filter(call => call.action === 'verifyStep')).toHaveLength(4))
+    expect(fixture.calls.filter(call => call.action === 'verifyStep').map(call => (call.input as { step: string }).step)).toEqual(['physical', 'vpn', 'proxy', 'container'])
   })
 
   it('copies and saves a profile without changing the network, then applies only a reviewed plan id', async () => {
@@ -154,5 +155,58 @@ describe('network configuration workflow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Apply this plan' }))
     await screen.findByText('Network state or plan expired. Inspect and generate a new plan. (PLAN_STALE)')
     expect(screen.getByRole('button', { name: 'Apply this plan' })).toBeDisabled()
+  })
+  it('accepts a working full-tunnel VPN under preserve policy even after its display name changes', async () => {
+    const fixture = createNetworkFixture()
+    fixture.snapshot.vpn.name = 'Company'
+    fixture.snapshot.vpn.splitTunneling = false
+    fixture.snapshot.vpn.routePrefixes = []
+    fixture.snapshot.selectedRoutes[0] = { ...fixture.snapshot.selectedRoutes[0]!, interfaceAlias: 'Company', prefix: '0.0.0.0/0' }
+    render(<NetworkManagerPanel api={fixture.api} />)
+    const validate = await screen.findByRole('button', { name: 'Validate VPN' })
+    fireEvent.click(validate)
+    await waitFor(() => expect(within(validate.closest('section')!).getByText('Validated')).toBeVisible())
+  })
+  it('opens the fixed task tool and checks only the requested relay stage', async () => {
+    const fixture = createNetworkFixture()
+    render(<NetworkManagerPanel api={fixture.api} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Open Task Scheduler' }))
+    await waitFor(() => expect(fixture.calls.find(call => call.action === 'openSystemTool')?.input).toBe('tasks'))
+    fireEvent.click(screen.getByRole('button', { name: 'Check relay readiness' }))
+    await waitFor(() => expect(fixture.calls.find(call => call.action === 'verifyStep')?.input).toMatchObject({ step: 'relay' }))
+    expect(fixture.calls.some(call => call.action === 'apply')).toBe(false)
+  })
+  it('polls read-only startup evidence while one apply is pending and stops on unmount', async () => {
+    const fixture = createNetworkFixture()
+    let release!: (value: Awaited<ReturnType<typeof fixture.api.apply>>) => void
+    fixture.api.apply = vi.fn<typeof fixture.api.apply>(() => new Promise(resolve => { release = resolve }))
+    fixture.api.inspect = vi.fn<typeof fixture.api.inspect>(async () => ({ ok: true, data: { ...fixture.snapshot, tunnel: { ...fixture.snapshot.tunnel, relayReady: false } } }))
+    const rendered = render(<NetworkManagerPanel api={fixture.api} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Inspect and preview changes' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Apply this plan' })).not.toBeDisabled())
+    vi.useFakeTimers()
+    fireEvent.click(screen.getByRole('button', { name: 'Apply this plan' }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(2100) })
+    expect(fixture.api.inspect).toHaveBeenCalledTimes(1)
+    expect(within(screen.getByTestId('recovery-relay')).getByText('Starting — waiting for readiness')).toBeVisible()
+    expect(fixture.api.apply).toHaveBeenCalledTimes(1)
+    expect(screen.getByLabelText('Profile name')).toBeDisabled()
+    rendered.unmount()
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); release({ ok: true, data: { planId: 'fixture-plan', status: 'applied', completedChanges: [], rollback: [], probes: [], issues: [] } }) })
+    expect(fixture.api.inspect).toHaveBeenCalledTimes(1)
+  })
+  it('bounds a stalled status read by wall clock without starting overlapping reads', async () => {
+    const fixture = createNetworkFixture()
+    fixture.api.apply = vi.fn<typeof fixture.api.apply>(() => new Promise(() => {}))
+    fixture.api.inspect = vi.fn<typeof fixture.api.inspect>(() => new Promise(() => {}))
+    render(<NetworkManagerPanel api={fixture.api} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Inspect and preview changes' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Apply this plan' })).not.toBeDisabled())
+    vi.useFakeTimers()
+    fireEvent.click(screen.getByRole('button', { name: 'Apply this plan' }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(200000) })
+    expect(fixture.api.inspect).toHaveBeenCalledTimes(1)
+    expect(screen.getByText(/Live status could not be refreshed/)).toBeVisible()
+    expect(fixture.api.apply).toHaveBeenCalledTimes(1)
   })
 })

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Plus, Tag as TagIcon, ArrowDownUp, RefreshCw, ChevronDown, ChevronRight, Server, Layers, Cable } from 'lucide-react'
+import { Plus, Tag as TagIcon, ArrowDownUp, RefreshCw, ChevronDown, ChevronRight, Server, Layers, Cable, Copy } from 'lucide-react'
 import { useHostManagementStore } from '../../stores/hostManagementStore'
 import { useTranslation } from '../../../../i18n'
 import { SearchField } from '../../../../components/ui/SearchField'
@@ -9,6 +9,7 @@ import type { Host } from '../../types/resourceTypes'
 import { HostSshAccountSelect } from './HostSshAccountSelect'
 import { findHostSshAccount } from '../../types/hostSshAccounts'
 import { isHostSshBusy, useHostSshStore } from '../../stores/hostSshStore'
+import { useCopyHostTag } from './useCopyHostTag'
 
 export type HostListProps = {
   onOpenTagModal?: () => void
@@ -54,6 +55,7 @@ export function HostList({ onOpenTagModal, onOpenImportExport, onRequestTerminal
 
   const hosts = filteredHosts()
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
+  const { busyTagId, feedback: copyFeedback, copyTag } = useCopyHostTag()
 
   const toggleGroup = (groupId: string) => {
     setCollapsedGroups((prev) => ({
@@ -197,22 +199,46 @@ export function HostList({ onOpenTagModal, onOpenImportExport, onRequestTerminal
             {tags.map((tag) => {
               const count = allHosts.filter((h) => h.tagIds.includes(tag.id)).length
               return (
-                <button
+                <div
                   key={tag.id}
-                  type="button"
-                  onClick={() => setSelectedTagId(selectedTagId === tag.id ? null : tag.id)}
-                  aria-pressed={selectedTagId === tag.id}
-                  className={`rounded-[var(--radius-sm)] px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                  className={`inline-flex items-center rounded-[var(--radius-sm)] text-[11px] font-medium transition-colors ${
                     selectedTagId === tag.id
                       ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)]'
-                      : 'bg-[var(--color-surface-container)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
+                      : 'bg-[var(--color-surface-container)] text-[var(--color-text-secondary)]'
                   }`}
                 >
-                  {tag.name} ({count})
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedTagId(selectedTagId === tag.id ? null : tag.id)}
+                    aria-pressed={selectedTagId === tag.id}
+                    className="rounded-[var(--radius-sm)] px-2 py-0.5 hover:opacity-80 focus-visible:outline-2 focus-visible:outline-[var(--color-border-focus)]"
+                  >
+                    {tag.name} ({count})
+                  </button>
+                  <IconButton
+                    icon={<Copy size={11} />}
+                    label={t('managedResources.tagCopy.action', { name: tag.name })}
+                    size="2xs"
+                    className="mr-0.5"
+                    style={{ color: 'inherit' }}
+                    disabled={count === 0 || busyTagId !== null}
+                    loading={busyTagId === tag.id}
+                    onClick={() => { void copyTag(tag.id) }}
+                  />
+                </div>
               )
             })}
           </div>
+        )}
+        {copyFeedback && (
+          <p
+            role={copyFeedback.kind === 'error' ? 'alert' : 'status'}
+            className={`text-[11px] ${copyFeedback.kind === 'error' ? 'text-[var(--color-error)]' : 'text-[var(--color-text-secondary)]'}`}
+          >
+            {copyFeedback.kind === 'success'
+              ? t('managedResources.tagCopy.success', { hostCount: copyFeedback.hostCount, accountCount: copyFeedback.accountCount })
+              : t(copyFeedback.messageKey)}
+          </p>
         )}
       </div>
 

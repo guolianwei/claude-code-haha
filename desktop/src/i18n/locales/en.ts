@@ -1,9 +1,18 @@
+import { networkPathEn } from '../../features/network-manager/i18n/pathStrings'
+import { networkRecoveryEn } from '../../features/network-manager/i18n/recoveryStrings'
 import { networkExecutionEn } from '../../features/network-manager/i18n/executionStrings'
 import { m2En } from '../../features/managed-resources/i18n/m2Strings'
 
 export const en = {
   ...m2En,
+  'managedResources.tagCopy.action': 'Copy all server connections under “{name}” (Markdown)',
+  'managedResources.tagCopy.success': 'Copied connections for {hostCount} hosts and {accountCount} accounts (Markdown).',
+  'managedResources.tagCopy.failed': 'Copy failed. Please try again.',
+  'managedResources.tagCopy.empty': 'This tag has no servers to copy.',
+  'managedResources.tagCopy.changed': 'The tag or connection details changed. Please copy again.',
   ...networkExecutionEn,
+  ...networkRecoveryEn,
+  ...networkPathEn,
   "networkManager.vpnRouteTitle": "Bind destination to Windows VPN",
   "networkManager.vpnRouteHint": "Choose an existing Windows VPN and enter up to 32 IPv4 addresses or CIDR ranges. Preview checks every destination and applies the whole list only when all routes are safe. SakuraCat DIRECT and target connectivity are checked separately.",
   "networkManager.vpnRouteDestination": "Destination IPs or CIDR ranges",

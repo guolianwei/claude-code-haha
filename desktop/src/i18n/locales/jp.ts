@@ -1,3 +1,5 @@
+import { networkPathJp } from '../../features/network-manager/i18n/pathStrings'
+import { networkRecoveryJp } from '../../features/network-manager/i18n/recoveryStrings'
 import { networkExecutionJp } from '../../features/network-manager/i18n/executionStrings'
 import { m2Jp } from '../../features/managed-resources/i18n/m2Strings'
 import type {
@@ -5,7 +7,14 @@ import type {
 
 export const jp: Record<TranslationKey, string> = {
   ...m2Jp,
+  'managedResources.tagCopy.action': '「{name}」配下の全サーバー接続情報をコピー（Markdown）',
+  'managedResources.tagCopy.success': '{hostCount} 台のホスト、{accountCount} 個のアカウントの接続情報をコピーしました（Markdown）。',
+  'managedResources.tagCopy.failed': 'コピーに失敗しました。再試行してください。',
+  'managedResources.tagCopy.empty': 'このタグにはコピーできるサーバーがありません。',
+  'managedResources.tagCopy.changed': 'タグまたは接続情報が変更されました。もう一度コピーしてください。',
   ...networkExecutionJp,
+  ...networkRecoveryJp,
+  ...networkPathJp,
   "networkManager.vpnRouteTitle": "宛先を Windows VPN に割り当て",
   "networkManager.vpnRouteHint": "既存の Windows VPN と最大 32 件の IPv4 アドレスまたは CIDR を指定します。すべての宛先を確認し、安全な場合のみ一括適用します。SakuraCat DIRECT と接続性は別途確認してください。",
   "networkManager.vpnRouteDestination": "宛先 IP または CIDR の一覧",

@@ -23,7 +23,7 @@ describe('NetworkManagerButton', () => {
     await screen.findByLabelText('Profile name')
     fireEvent.click(screen.getByRole('button', { name: 'Close network configuration' }))
     expect(screen.queryByRole('dialog')).toBeNull()
-    expect(fixture.calls.map(call => call.action).sort()).toEqual(['discoverProxy', 'list', 'vpnRouteOptions'])
+    expect(fixture.calls.map(call => call.action).sort()).toEqual(['discoverProxy', 'list', 'vpnRouteOptions', 'vpnRouteOptions'])
   })
   it('opens ncpa.cpl only after a click and preserves an unsaved draft with no save/apply', async () => {
     useSettingsStore.setState({ locale: 'en' })
@@ -118,11 +118,11 @@ describe('NetworkManagerButton', () => {
     expect(screen.getByText('What this tool manages')).toBeVisible()
     expect(screen.getByText('Configuration and validation flow')).toBeVisible()
     expect(screen.getByText('Underlying principles and safety boundaries')).toBeVisible()
-    expect(fixture.calls.map(call => call.action).sort()).toEqual(['discoverProxy', 'list', 'vpnRouteOptions'])
+    expect(fixture.calls.map(call => call.action).sort()).toEqual(['discoverProxy', 'list', 'vpnRouteOptions', 'vpnRouteOptions'])
 
     fireEvent.click(screen.getByRole('button', { name: 'Back to configuration' }))
     expect(await screen.findByLabelText('Profile name')).toBeVisible()
     expect(screen.getByLabelText('Profile name')).toHaveValue('Unsaved fixture profile')
-    expect(fixture.calls.map(call => call.action).sort()).toEqual(['discoverProxy', 'list', 'vpnRouteOptions'])
+    expect(fixture.calls.map(call => call.action).sort()).toEqual(['discoverProxy', 'list', 'vpnRouteOptions', 'vpnRouteOptions'])
   })
 })

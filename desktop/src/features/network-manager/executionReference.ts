@@ -14,6 +14,8 @@ export const profileParameterReference = {
   gatewayPort: { label: 'networkManager.gatewayPort', stage: 'physical', actions: ['tcp'] },
   vpnName: { label: 'networkManager.vpnName', stage: 'vpn', actions: ['snapshot', 'split', 'vpnRouteAdd'] },
   vpnScope: { label: 'networkManager.vpnScope', stage: 'vpn', actions: ['snapshot', 'split', 'vpnRouteAdd'] },
+  vpnServerAddress: { label: 'networkManager.recovery.vpnServer', stage: 'vpn', actions: ['snapshot', 'vpnRouteOptions'] },
+  splitTunnelingPolicy: { label: 'networkManager.recovery.splitPolicy', stage: 'vpn', actions: ['plan', 'split', 'vpnRouteAdd'] },
   proxyConfigPath: { label: 'networkManager.proxyConfig', stage: 'proxy', actions: ['proxyDiscover', 'proxyController', 'proxyInspect', 'proxy-bypass'] },
   sakuraExecutable: { label: 'networkManager.sakuraPath', stage: 'proxy', actions: ['proxyDiscover', 'loginSakura'] },
   proxyPort: { label: 'networkManager.proxyEndpoint', stage: 'proxy', actions: ['proxyDiscover', 'proxyInspect', 'http-proxy'] },
@@ -26,6 +28,11 @@ export const profileParameterReference = {
   relayTaskName: { label: 'networkManager.service', stage: 'containers', actions: ['snapshot', 'task', 'taskEnabled'] },
   relayPort: { label: 'networkManager.relayPort', stage: 'containers', actions: ['tcp'] },
   expectedRelaySource: { label: 'networkManager.expectedSource', stage: 'containers', actions: ['plan', 'apply'] },
+  relayExecutable: { label: 'networkManager.recovery.relayExecutable', stage: 'containers', actions: ['relayInspect', 'relayTaskCreate', 'relayTaskRemove'] },
+  relayLocalPort: { label: 'networkManager.recovery.localPort', stage: 'containers', actions: ['relayInspect', 'verifyStep'] },
+  tunnelAddress: { label: 'networkManager.recovery.tunnelAddress', stage: 'containers', actions: ['snapshot', 'verifyStep'] },
+  readinessTimeoutSeconds: { label: 'networkManager.recovery.timeout', stage: 'containers', actions: ['apply', 'relayInspect'] },
+  verificationTargets: { label: 'networkManager.recovery.targetsTitle', stage: 'verify', actions: ['verifyStep', 'verify', 'tcp', 'http-direct'] },
 } satisfies Record<keyof NetworkProfile, ParameterReference>
 
 export const stageReferenceActions: Record<ReferenceStage, string[]> = {
@@ -33,9 +40,9 @@ export const stageReferenceActions: Record<ReferenceStage, string[]> = {
   physical: ['snapshot', 'inspect', 'tcp', 'openNetworkConnections'],
   vpn: ['snapshot', 'loginVpn', 'split', 'vpnRouteAdd', 'vpnRouteRemove', 'openNetworkConnections'],
   proxy: ['proxyDiscover', 'proxyController', 'proxyInspect', 'loginSakura', 'proxy-bypass', 'copyAcl', 'http-proxy'],
-  containers: ['snapshot', 'service', 'serviceStartup', 'task', 'taskEnabled', 'routeAdd', 'routeRemove', 'tcp'],
+  containers: ['snapshot', 'service', 'serviceStartup', 'task', 'taskEnabled', 'relayInspect', 'relayTaskCreate', 'relayTaskRemove', 'routeAdd', 'routeRemove', 'tcp', 'verifyStep', 'openSystemTool'],
   plan: ['plan', 'apply', 'recover', 'verify'],
-  verify: ['probeHost', 'tcp'],
+  verify: ['probeHost', 'tcp', 'http-direct', 'verifyStep'],
   binding: ['vpnBinding', 'vpnRouteAdd', 'vpnRouteRemove', 'routeAdd', 'routeRemove', 'snapshot', 'vpnRouteProbe', 'http-direct', 'tcp'],
 }
 export const stageEvidenceKey: Record<ReferenceStage, TranslationKey> = {

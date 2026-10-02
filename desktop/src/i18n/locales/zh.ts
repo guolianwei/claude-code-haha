@@ -1,3 +1,5 @@
+import { networkPathZh } from '../../features/network-manager/i18n/pathStrings'
+import { networkRecoveryZh } from '../../features/network-manager/i18n/recoveryStrings'
 import { networkExecutionZh } from '../../features/network-manager/i18n/executionStrings'
 import { m2Zh } from '../../features/managed-resources/i18n/m2Strings'
 import type {
@@ -5,7 +7,14 @@ import type {
 
 export const zh: Record<TranslationKey, string> = {
   ...m2Zh,
+  'managedResources.tagCopy.action': '复制「{name}」下全部服务器连接信息（Markdown）',
+  'managedResources.tagCopy.success': '已复制 {hostCount} 台主机、{accountCount} 个账号的连接信息（Markdown）。',
+  'managedResources.tagCopy.failed': '复制失败，请重试。',
+  'managedResources.tagCopy.empty': '此标签下没有可复制的服务器。',
+  'managedResources.tagCopy.changed': '标签或连接信息已变化，请重新复制。',
   ...networkExecutionZh,
+  ...networkRecoveryZh,
+  ...networkPathZh,
   "networkManager.vpnRouteTitle": "目标地址绑定 Windows VPN",
   "networkManager.vpnRouteHint": "选择已有 Windows VPN，填写最多 32 个 IPv4 地址或网段。预览逐项检查，全部满足条件才会一次应用。SakuraCat DIRECT 和目标连通性需分别校验。",
   "networkManager.vpnRouteDestination": "目标 IP 或网段列表",

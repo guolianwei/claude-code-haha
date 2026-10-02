@@ -6,6 +6,7 @@ import { createManagedResourcesModule } from '../../../electron/services/managed
 import { ELECTRON_IPC_CHANNELS } from '../../../electron/ipc/channels'
 import { createHostWorkspaceFixture } from './hostWorkspaceFixture'
 import { verifySshAccounts } from './sshAccountsFixture'
+import { createTagConnectionsFixture } from './tagConnectionsFixture'
 
 const sandbox = process.env.M2_SMOKE_SANDBOX!
 const output = process.env.M2_SMOKE_OUTPUT!
@@ -15,6 +16,7 @@ app.setName('cc-haha-m2-isolated-fixture')
 const SENTINEL = 'M2_NATIVE_FIXTURE_SECRET_ONLY'
 const steps: Array<{ name: string; status: 'passed' }> = []
 const driverEvidence = { opened: 0, closed: 0, scans: 0 }
+const tagConnectionsFixture = process.env.M2_SMOKE_TAG_COPY === '1' ? createTagConnectionsFixture() : null
 let win: BrowserWindow | undefined
 let module: ReturnType<typeof createManagedResourcesModule> | undefined
 let workspaceFixture: Awaited<ReturnType<typeof createHostWorkspaceFixture>> | undefined
@@ -86,7 +88,7 @@ void app.whenReady().then(async () => {
   try {
     await fs.mkdir(output, { recursive: true })
     win = new BrowserWindow({ width: 1280, height: 960, show: false,
-      webPreferences: { preload: path.join(sandbox, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true },
+      webPreferences: { preload: path.join(sandbox, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, backgroundThrottling: !tagConnectionsFixture },
     })
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
     // This fixture cannot reach any external endpoint or the user's local apps.
@@ -100,6 +102,7 @@ void app.whenReady().then(async () => {
     ipcMain.handle(ELECTRON_IPC_CHANNELS.getServerUrl, () => 'http://127.0.0.1:0')
     module = createManagedResourcesModule({
       ipcMain, getMainWindow: () => win ?? null, activeConfigDir: path.join(sandbox, 'config'), userDataDir: sandbox,
+      ...(tagConnectionsFixture ? { clipboard: tagConnectionsFixture.clipboard, credentialRevealAuthorizer: tagConnectionsFixture.authorizer } : {}),
       dataBrowserAdapters: {
         async open(connection) {
           driverEvidence.opened += 1
@@ -142,6 +145,18 @@ void app.whenReady().then(async () => {
         },
       },
     })
+    if (tagConnectionsFixture) {
+      await win.loadFile(path.join(sandbox, 'ui', 'index.html'))
+      win.webContents.debugger.attach('1.3')
+      stage = 'tag connection clipboard workflow'
+      await tagConnectionsFixture.verify(win, { clickButton, clickExpression, waitFor, type }, module, output)
+      module.cleanup()
+      clearTimeout(deadline)
+      win.destroy()
+      console.log('TAG_CONNECTIONS_NATIVE_SMOKE passed')
+      app.quit()
+      return
+    }
     workspaceFixture = await createHostWorkspaceFixture(module, sandbox, SENTINEL, directorySelections)
     await win.loadFile(path.join(sandbox, 'ui', 'index.html'))
     win.webContents.debugger.attach('1.3')

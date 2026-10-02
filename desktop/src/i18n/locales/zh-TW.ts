@@ -1,3 +1,5 @@
+import { networkPathTw } from '../../features/network-manager/i18n/pathStrings'
+import { networkRecoveryTw } from '../../features/network-manager/i18n/recoveryStrings'
 import { networkExecutionTw } from '../../features/network-manager/i18n/executionStrings'
 import { m2Tw } from '../../features/managed-resources/i18n/m2Strings'
 import type {
@@ -5,7 +7,14 @@ import type {
 
 export const zh: Record<TranslationKey, string> = {
   ...m2Tw,
+  'managedResources.tagCopy.action': '複製「{name}」下全部伺服器連線資訊（Markdown）',
+  'managedResources.tagCopy.success': '已複製 {hostCount} 台主機、{accountCount} 個帳號的連線資訊（Markdown）。',
+  'managedResources.tagCopy.failed': '複製失敗，請重試。',
+  'managedResources.tagCopy.empty': '此標籤下沒有可複製的伺服器。',
+  'managedResources.tagCopy.changed': '標籤或連線資訊已變更，請重新複製。',
   ...networkExecutionTw,
+  ...networkRecoveryTw,
+  ...networkPathTw,
   "networkManager.vpnRouteTitle": "目標位址綁定 Windows VPN",
   "networkManager.vpnRouteHint": "選擇現有 Windows VPN，輸入最多 32 個 IPv4 位址或網段。預覽逐項檢查，全部符合條件才會一次套用。SakuraCat DIRECT 與目標連通性須分別驗證。",
   "networkManager.vpnRouteDestination": "目標 IP 或網段清單",

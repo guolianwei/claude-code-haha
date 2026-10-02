@@ -42,7 +42,7 @@ describe('network profile persistence migration', () => {
   it('migrates the frozen initial profile format without changing user choices', () => {
     const old = { schemaVersion: 0, profiles: [{ id: 'remote-a', name: 'Remote A', mode: 'home', vpnName: 'Company VPN', containerEnabled: false }] }
     const migrated = migrateNetworkProfiles(old)
-    expect(migrated.schemaVersion).toBe(1)
+    expect(migrated.schemaVersion).toBe(2)
     expect(migrated.profiles[0]).toMatchObject({ id: 'remote-a', name: 'Remote A', vpnName: 'Company VPN', containerEnabled: false, vpnScope: 'allUsers' })
     expect(migrateNetworkProfiles(migrated)).toEqual(migrated)
     expect(old.profiles[0]).not.toHaveProperty('proxyPort')
@@ -54,5 +54,15 @@ describe('network profile persistence migration', () => {
     expect(() => migrateNetworkProfiles('corrupt')).toThrow()
     const profile = createDefaultNetworkProfiles()[0]
     expect(() => migrateNetworkProfiles({ schemaVersion: 1, revision: 0, profiles: [profile, profile] })).toThrow()
+  })
+  it('migrates version 1 without forcing an already working VPN to split tunneling', () => {
+    const { vpnServerAddress: _server, splitTunnelingPolicy: _policy, relayExecutable: _exe, relayLocalPort: _port,
+      tunnelAddress: _address, readinessTimeoutSeconds: _timeout, verificationTargets: _targets, ...oldProfile } = createDefaultNetworkProfiles()[0]
+    const old = { schemaVersion: 1, revision: 12, profiles: [oldProfile] }
+    const result = migrateNetworkProfiles(old)
+    expect(result).toMatchObject({ schemaVersion: 2, revision: 12, profiles: [{ vpnName: oldProfile.vpnName,
+      vpnServerAddress: oldProfile.vpnName, splitTunnelingPolicy: 'preserve', readinessTimeoutSeconds: 60, verificationTargets: [] }] })
+    expect(migrateNetworkProfiles(result)).toEqual(result)
+    expect(old).not.toHaveProperty('profiles.0.relayExecutable')
   })
 })
